@@ -1,0 +1,483 @@
+# Gene000 MyActuator RSU
+
+# SPDX-FileCopyrightText: Generative Bionics S.R.L.
+# SPDX-License-Identifier: BSD-3-Clause
+
+# -----------------------------------------------------------------------------
+# Gene 000 EtherCAT Primer bus configuration
+# -----------------------------------------------------------------------------
+#
+# Actuator variants on this bus:
+#
+#   X10-200  Large hip/knee actuator
+#             - TxPDO 0x1A02: 9 entries
+#             - Includes drive_temperature (0x200C)
+#             - 22-byte TxPDO
+#
+#   X8-120   Mid-size actuator
+#             - TxPDO 0x1A02: 8 entries
+#             - No drive_temperature
+#             - 20-byte TxPDO
+#
+#   X6-60    Small actuator
+#             - Same PDO layout as X8-120
+#
+#   X4-36    Compact wrist actuator
+#             - Same PDO layout as X8-120
+#
+# IMPORTANT
+# -----------------------------------------------------------------------------
+# All MyActuator variants currently share the same EEPROM identity
+# (Vendor/Product/Revision). SOEM cannot distinguish them automatically.
+#
+# Devices are therefore matched using:
+#
+#   1. Configured Station Alias
+#      - EEPROM word: 0x0004
+#      - Must be unique and pre-flashed per actuator
+#
+#   2. The `model` field
+#      - Selects PDO bind table / struct layout
+#      - Cross-checked via SDO probe of 0x1A02:0 at PRE-OP
+#
+# Bus ordering is NOT meaningful.
+# Alias is the only binding key.
+# -----------------------------------------------------------------------------
+
+[[ethercat]]
+init_state              = "EC_STATE_OPERATIONAL"
+default_recovery_state  = "EC_STATE_OPERATIONAL"
+
+# -----------------------------------------------------------------------------
+# DS402 operation modes
+# -----------------------------------------------------------------------------
+
+[DS402.modes]
+OP_PP   = 0x01 # Profile Position
+OP_PV   = 0x03 # Profile Velocity
+OP_TQ   = 0x04 # Profile Torque
+OP_PVT  = 0x05 # Cyclic Impedance Control (MIT mode)
+OP_HOM  = 0x06 # Homing
+OP_CSP  = 0x08 # Cyclic Synchronous Position
+OP_CSV  = 0x09 # Cyclic Synchronous Velocity
+OP_CST  = 0x0A # Cyclic Synchronous Torque
+
+# -----------------------------------------------------------------------------
+# Driver defaults
+# -----------------------------------------------------------------------------
+#
+# MT_Device is the EEPROM name shared by all MyActuator variants.
+# Per-model defaults are defined below and should be copied into device
+# overrides where needed.
+# -----------------------------------------------------------------------------
+
+[driver_defaults.MT_Device]
+vendor_id      = 0x00202008
+operation_mode = "OP_PVT"
+debug          = true
+
+# -----------------------------------------------------------------------------
+# Model defaults
+# -----------------------------------------------------------------------------
+
+[driver_defaults.MT_Device.models.X10-200]
+operation_mode = "OP_PVT"
+max_torque     = 20000
+PVT_KP         = 500000
+PVT_KD         = 10000
+encoder_bits   = 19
+
+[driver_defaults.MT_Device.models.X8-120]
+operation_mode = "OP_PVT"
+max_torque     = 10000
+PVT_KP         = 80000
+PVT_KD         = 5000
+encoder_bits   = 17
+
+[driver_defaults.MT_Device.models.X6-60]
+operation_mode = "OP_PVT"
+max_torque     = 1000
+PVT_KP         = 30000
+PVT_KD         = 2000
+encoder_bits   = 17
+
+[driver_defaults.MT_Device.models.X4-36]
+operation_mode = "OP_PVT"
+max_torque     = 1000
+PVT_KP         = 20000
+PVT_KD         = 2000
+encoder_bits   = 18
+
+# -----------------------------------------------------------------------------
+# Default trajectory configuration
+# -----------------------------------------------------------------------------
+
+[driver_defaults.MT_Device.trajectory]
+type       = "sin"
+frequency  = 0.1
+amplitude  = 0
+
+# -----------------------------------------------------------------------------
+# Device configuration
+# -----------------------------------------------------------------------------
+#
+# Required fields:
+#
+#   alias
+#       Unique EEPROM Configured Station Alias
+#
+#   model
+#       One of:
+#         - X10-200
+#         - X8-120
+#         - X6-60
+#         - X4-36
+#
+# Optional overrides:
+#
+#   max_torque
+#   PVT_KP
+#   PVT_KD
+#   encoder_bits
+#
+# Naming convention:
+#
+#   <side>_<joint>
+#
+# Examples:
+#
+#   l_hip_pitch
+#   r_knee
+# -----------------------------------------------------------------------------
+
+# =============================================================================
+# Right Arm
+# =============================================================================
+
+[[devices]]
+name            = "r_shoulder_pitch"
+driver          = "MT_Device"
+alias           = 1101
+model           = "X8-120"
+operation_mode  = "OP_PVT"
+max_torque      = 10000
+PVT_KP          = 50000
+PVT_KD          = 5000
+debug           = false
+
+[[devices]]
+name            = "r_shoulder_roll"
+driver          = "MT_Device"
+alias           = 1102
+model           = "X6-60"
+operation_mode  = "OP_PVT"
+max_torque      = 5000
+PVT_KP          = 40000
+PVT_KD          = 5000
+debug           = false
+
+[[devices]]
+name            = "r_shoulder_yaw"
+driver          = "MT_Device"
+alias           = 1103
+model           = "X6-60"
+operation_mode  = "OP_PVT"
+max_torque      = 5000
+PVT_KP          = 40000
+PVT_KD          = 5000
+debug           = false
+
+[[devices]]
+name            = "r_elbow"
+driver          = "MT_Device"
+alias           = 1104
+model           = "X6-60"
+operation_mode  = "OP_PVT"
+max_torque      = 5000
+PVT_KP          = 40000
+PVT_KD          = 5000
+debug           = false
+
+[[devices]]
+name            = "r_wrist_yaw"
+driver          = "MT_Device"
+alias           = 1105
+model           = "X4-36"
+operation_mode  = "OP_PVT"
+max_torque      = 2000
+PVT_KP          = 20000
+PVT_KD          = 5000
+debug           = false
+
+[[devices]]
+name            = "r_wrist_motor_2"
+driver          = "MT_Device"
+alias           = 1106
+model           = "X4-36"
+operation_mode  = "OP_PVT"
+max_torque      = 2000
+PVT_KP          = 20000
+PVT_KD          = 5000
+debug           = false
+
+[[devices]]
+name            = "r_wrist_motor_1"
+driver          = "MT_Device"
+alias           = 1107
+model           = "X4-36"
+operation_mode  = "OP_PVT"
+max_torque      = 2000
+PVT_KP          = 20000
+PVT_KD          = 5000
+debug           = false
+
+# =============================================================================
+# Left Arm
+# =============================================================================
+
+[[devices]]
+name            = "l_shoulder_pitch"
+driver          = "MT_Device"
+alias           = 1201
+model           = "X8-120"
+operation_mode  = "OP_PVT"
+max_torque      = 10000
+PVT_KP          = 50000
+PVT_KD          = 5000
+debug           = false
+
+[[devices]]
+name            = "l_shoulder_roll"
+driver          = "MT_Device"
+alias           = 1202
+model           = "X6-60"
+operation_mode  = "OP_PVT"
+max_torque      = 5000
+PVT_KP          = 40000
+PVT_KD          = 5000
+debug           = false
+
+[[devices]]
+name            = "l_shoulder_yaw"
+driver          = "MT_Device"
+alias           = 1203
+model           = "X6-60"
+operation_mode  = "OP_PVT"
+max_torque      = 5000
+PVT_KP          = 40000
+PVT_KD          = 5000
+debug           = false
+
+[[devices]]
+name            = "l_elbow"
+driver          = "MT_Device"
+alias           = 1204
+model           = "X6-60"
+operation_mode  = "OP_PVT"
+max_torque      = 5000
+PVT_KP          = 40000
+PVT_KD          = 5000
+debug           = false
+
+[[devices]]
+name            = "l_wrist_yaw"
+driver          = "MT_Device"
+alias           = 1205
+model           = "X4-36"
+operation_mode  = "OP_PVT"
+max_torque      = 2000
+PVT_KP          = 20000
+PVT_KD          = 5000
+debug           = false
+
+[[devices]]
+name            = "l_wrist_motor_2"
+driver          = "MT_Device"
+alias           = 1206
+model           = "X4-36"
+operation_mode  = "OP_PVT"
+max_torque      = 2000
+PVT_KP          = 20000
+PVT_KD          = 5000
+debug           = false
+
+[[devices]]
+name            = "l_wrist_motor_1"
+driver          = "MT_Device"
+alias           = 1207
+model           = "X4-36"
+operation_mode  = "OP_PVT"
+max_torque      = 2000
+PVT_KP          = 20000
+PVT_KD          = 5000
+debug           = false
+
+
+# =============================================================================
+# Right Leg
+# =============================================================================
+
+[[devices]]
+name        = "r_hip_pitch"
+driver      = "MT_Device"
+alias       = 1301
+model       = "X10-200"
+max_torque  = 5000
+PVT_KP      = 300000
+PVT_KD      = 10000
+
+[[devices]]
+name        = "r_hip_roll"
+driver      = "MT_Device"
+alias       = 1302
+model       = "X10-200"
+max_torque  = 5000
+PVT_KP      = 300000
+PVT_KD      = 10000
+
+[[devices]]
+name        = "r_hip_yaw"
+driver      = "MT_Device"
+alias       = 1303
+model       = "X8-120"
+max_torque  = 2000
+PVT_KP      = 30000
+PVT_KD      = 2000
+
+[[devices]]
+name        = "r_knee"
+driver      = "MT_Device"
+alias       = 1304
+model       = "X10-200"
+max_torque  = 5000
+PVT_KP      = 300000
+PVT_KD      = 10000
+
+[[devices]]
+name        = "r_ankle_motor_1"
+driver      = "MT_Device"
+alias       = 1305
+model       = "X6-60"
+max_torque  = 1000
+PVT_KP      = 20000
+PVT_KD      = 0
+
+[[devices]]
+name        = "r_ankle_motor_2"
+driver      = "MT_Device"
+alias       = 1306
+model       = "X6-60"
+max_torque  = 1000
+PVT_KP      = 20000
+PVT_KD      = 0
+
+# =============================================================================
+# Left Leg
+# =============================================================================
+
+[[devices]]
+name        = "l_hip_pitch"
+driver      = "MT_Device"
+alias       = 1401
+model       = "X10-200"
+max_torque  = 5000
+PVT_KP      = 300000
+PVT_KD      = 10000
+
+[[devices]]
+name        = "l_hip_roll"
+driver      = "MT_Device"
+alias       = 1402
+model       = "X10-200"
+max_torque  = 5000
+PVT_KP      = 300000
+PVT_KD      = 10000
+
+[[devices]]
+name        = "l_hip_yaw"
+driver      = "MT_Device"
+alias       = 1403
+model       = "X8-120"
+max_torque  = 2000
+PVT_KP      = 30000
+PVT_KD      = 2000
+
+[[devices]]
+name        = "l_knee"
+driver      = "MT_Device"
+alias       = 1404
+model       = "X10-200"
+max_torque  = 5000
+PVT_KP      = 300000
+PVT_KD      = 10000
+
+[[devices]]
+name        = "l_ankle_motor_1"
+driver      = "MT_Device"
+alias       = 1405
+model       = "X6-60"
+max_torque  = 1000
+PVT_KP      = 20000
+PVT_KD      = 0
+
+[[devices]]
+name        = "l_ankle_motor_2"
+driver      = "MT_Device"
+alias       = 1406
+model       = "X6-60"
+max_torque  = 1000
+PVT_KP      = 20000
+PVT_KD      = 0
+
+# =============================================================================
+# Torso
+# =============================================================================
+
+[[devices]]
+name            = "torso_roll"
+driver          = "MT_Device"
+alias           = 1501
+model           = "X8-120"
+operation_mode  = "OP_PVT"
+max_torque      = 10000
+PVT_KP          = 50000
+PVT_KD          = 5000
+debug           = false
+
+[[devices]]
+name            = "torso_yaw"
+driver          = "MT_Device"
+alias           = 1502
+model           = "X8-120"
+operation_mode  = "OP_PVT"
+max_torque      = 10000
+PVT_KP          = 50000
+PVT_KD          = 5000
+debug           = false
+
+# =============================================================================
+# Neck
+# =============================================================================
+[driver_defaults.CapitanDrv]
+vendor_id      = 0x0000029C
+encoder_bits   = 13
+operation_mode  = "OP_CSP"
+
+
+[[devices]]
+name    = "neck_yaw"
+driver  = "CapitanDrv"
+alias   = 1601
+
+
+[[devices]]
+name    = "neck_pitch"
+driver  = "CapitanDrv"
+alias   = 1602
+
+[[devices]]
+name    = "neck_roll"
+driver  = "CapitanDrv"
+alias   = 1603
+operation_mode  = "OP_CSP"
+encoder_bits   = 13
