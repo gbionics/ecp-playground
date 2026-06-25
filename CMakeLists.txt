@@ -55,12 +55,17 @@ set_property(TARGET actuator-test-spline PROPERTY CXX_SCAN_FOR_MODULES OFF)
 set_target_properties(actuator-test-spline PROPERTIES AUTOMOC OFF AUTOUIC OFF AUTORCC OFF)
 target_link_libraries(actuator-test-spline PRIVATE actuator_test_core)
 
+add_executable(
+    actuator-cli
+    src/actuator-cli.cpp
+)
+target_link_libraries(actuator-cli PRIVATE ethercat-primer::ethercat-primer)
 add_custom_target(
-    actuator-test-spline-capabilities
-    COMMAND ${CMAKE_SOURCE_DIR}/scripts/apply-actuator-capabilities.sh $<TARGET_FILE:actuator-test-spline>
-    DEPENDS actuator-test-spline
+    actuator-cli-capabilities
+    COMMAND ${CMAKE_SOURCE_DIR}/scripts/apply-actuator-capabilities.sh $<TARGET_FILE:actuator-cli>
+    DEPENDS actuator-cli
     USES_TERMINAL
-    COMMENT "Applying Linux capabilities to actuator-test-spline"
+    COMMENT "Applying Linux capabilities to actuator-cli"
 )
 
 if(BUILD_GUI)
