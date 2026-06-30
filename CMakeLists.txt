@@ -21,17 +21,30 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(ethercat_primer)
 
 
+# Override add_executable so that every executable target defined from here on
+# (including those in subdirectories such as gui/) has the real-time Linux
+# capabilities (re)applied at *configure* time.  This runs even when the binary
+# was already built in a previous run, so a plain re-configure is enough to
+# refresh the capabilities on existing executables.
+macro(add_executable name)
+    # Create the real target first.
+    _add_executable(${name} ${ARGN})
 
-# 1. Enable Qt automatic generation tools
-set(CMAKE_AUTOMOC ON)
-set(CMAKE_AUTOUIC ON)
-set(CMAKE_AUTORCC ON)
+    # Skip alias/imported declarations - they have no on-disk binary to patch.
+    if(NOT "ALIAS" IN_LIST ARGN AND NOT "IMPORTED" IN_LIST ARGN)
+        set(_rt_exe_path "${CMAKE_CURRENT_BINARY_DIR}/${name}")
+        if(EXISTS "${_rt_exe_path}")
+            message(STATUS "Applying RT capabilities to ${_rt_exe_path}")
+            execute_process(
+                COMMAND "${CMAKE_SOURCE_DIR}/scripts/apply-rt-capabilities.sh" "${_rt_exe_path}"
+            )
+        endif()
+        unset(_rt_exe_path)
+    endif()
+endmacro()
 
-option(BUILD_GUI "Build the Qt6 characterisation GUI" ON)
 
-# Shared library of the reusable control/IO core (used by both the console tool
-# and the GUI).  Keeping it in one place guarantees both front-ends drive the
-# actuators through identical logic.
+# Shared library of the reusable control/IO core used by the console tools.
 add_library(
     actuator_test_core STATIC
     src/actuator_test/device.cpp
@@ -43,7 +56,6 @@ add_library(
     src/actuator_test/trajectory.cpp
 )
 set_property(TARGET actuator_test_core PROPERTY CXX_SCAN_FOR_MODULES OFF)
-set_target_properties(actuator_test_core PROPERTIES AUTOMOC OFF AUTOUIC OFF AUTORCC OFF)
 target_include_directories(actuator_test_core PUBLIC include)
 target_link_libraries(actuator_test_core PUBLIC ethercat-primer::ethercat-primer)
 
@@ -51,8 +63,6 @@ add_executable(
     actuator-test-spline
     src/actuator-test-spline.cpp
 )
-set_property(TARGET actuator-test-spline PROPERTY CXX_SCAN_FOR_MODULES OFF)
-set_target_properties(actuator-test-spline PROPERTIES AUTOMOC OFF AUTOUIC OFF AUTORCC OFF)
 target_link_libraries(actuator-test-spline PRIVATE actuator_test_core)
 
 add_executable(
@@ -62,12 +72,8 @@ add_executable(
 target_link_libraries(actuator-cli PRIVATE ethercat-primer::ethercat-primer)
 add_custom_target(
     actuator-cli-capabilities
-    COMMAND ${CMAKE_SOURCE_DIR}/scripts/apply-actuator-capabilities.sh $<TARGET_FILE:actuator-cli>
+    COMMAND ${CMAKE_SOURCE_DIR}/scripts/apply-rt-capabilities.sh $<TARGET_FILE:actuator-cli>
     DEPENDS actuator-cli
     USES_TERMINAL
     COMMENT "Applying Linux capabilities to actuator-cli"
 )
-
-if(BUILD_GUI)
-    add_subdirectory(gui)
-endif()
