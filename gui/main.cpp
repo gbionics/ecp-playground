@@ -18,56 +18,53 @@
 
 #include <string>
 
-int main(int argc, char *argv[])
-{
-    using namespace actuator_test;
-    using namespace actuator_test::gui;
+int main(int argc, char *argv[]) {
+  using namespace actuator_test;
+  using namespace actuator_test::gui;
 
-    QApplication app(argc, argv);
+  QApplication app(argc, argv);
 
-    const QString default_config =
-        (argc > 1) ? QString::fromLocal8Bit(argv[1]) : QStringLiteral("../config/gene-000.toml");
+  const QString default_config =
+      (argc > 1) ? QString::fromLocal8Bit(argv[1])
+                 : QStringLiteral("../config/gene-000.toml");
 
-    // Best-effort runtime profile: fall back to defaults if the config is
-    // missing or unreadable (the worker reloads the real config on connect).
-    RuntimeProfile profile;
-    if (auto cfg = ecp::DeviceConfig::from_file(default_config.toStdString()))
-    {
-        profile = load_runtime_profile(*cfg);
-    }
+  // Best-effort runtime profile: fall back to defaults if the config is
+  // missing or unreadable (the worker reloads the real config on connect).
+  RuntimeProfile profile;
+  if (auto cfg = ecp::DeviceConfig::from_file(default_config.toStdString())) {
+    profile = load_runtime_profile(*cfg);
+  }
 
-    register_signal_handlers();
+  register_signal_handlers();
 
-    const std::string exe = (argc > 0) ? std::string(argv[0]) : std::string("./actuator-test-gui");
-    if (!ensure_runtime_capabilities(exe, profile))
-    {
-        QMessageBox::warning(
-            nullptr, QObject::tr("Missing capabilities"),
-            QObject::tr("This program lacks the EtherCAT/realtime capabilities and will fail to connect.\n\n"
-                        "Grant them with:\n  %1")
-                .arg(QString::fromStdString(capability_fix_command(exe))));
-    }
+  const std::string exe =
+      (argc > 0) ? std::string(argv[0]) : std::string("./actuator-test-gui");
+  if (!ensure_runtime_capabilities(exe, profile)) {
+    QMessageBox::warning(
+        nullptr, QObject::tr("Missing capabilities"),
+        QObject::tr("This program lacks the EtherCAT/realtime capabilities and "
+                    "will fail to connect.\n\n"
+                    "Grant them with:\n  %1")
+            .arg(QString::fromStdString(capability_fix_command(exe))));
+  }
 
-    if (ecp::rt_app_t::instance().init() == 0)
-    {
-        try_enable_realtime_scheduler(profile);
-    }
+  if (ecp::rt_app_t::instance().init() == 0) {
+    try_enable_realtime_scheduler(profile);
+  }
 
-    SetupWizard wizard(default_config);
-    QString config = default_config;
-    bool auto_connect = false;
-    if (wizard.exec() == QDialog::Accepted)
-    {
-        config = wizard.configPath();
-        auto_connect = true;
-    }
+  SetupWizard wizard(default_config);
+  QString config = default_config;
+  bool auto_connect = false;
+  if (wizard.exec() == QDialog::Accepted) {
+    config = wizard.configPath();
+    auto_connect = true;
+  }
 
-    MainWindow window(profile, config);
-    window.show();
-    if (auto_connect)
-    {
-        window.requestConnect(config);
-    }
+  MainWindow window(profile, config);
+  window.show();
+  if (auto_connect) {
+    window.requestConnect(config);
+  }
 
-    return app.exec();
+  return app.exec();
 }

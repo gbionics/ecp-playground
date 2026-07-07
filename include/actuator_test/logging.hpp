@@ -4,8 +4,8 @@
 #include "actuator_test/settings.hpp"
 #include "actuator_test/trajectory.hpp"
 
-#include <cstdint>
 #include <condition_variable>
+#include <cstdint>
 #include <cstdio>
 #include <memory>
 #include <mutex>
@@ -13,59 +13,65 @@
 #include <thread>
 #include <vector>
 
-namespace actuator_test
-{
+namespace actuator_test {
 
 struct JointPlan;
 
-struct LogSample
-{
-    double t_s = 0.0;
-    int phase = 0;
-    double phase_t_s = 0.0;
-    double ref_raw_counts = 0.0;
-    double ref_filt_counts = 0.0;
-    int32_t actual_counts = 0;
-    int16_t motor_temp_c = -1;
-    int16_t drive_temp_c = -1;
-    uint16_t error_code = 0;
+struct LogSample {
+  double t_s = 0.0;
+  int phase = 0;
+  double phase_t_s = 0.0;
+  double ref_raw_counts = 0.0;
+  double ref_filt_counts = 0.0;
+  int32_t actual_counts = 0;
+  int16_t motor_temp_c = -1;
+  int16_t drive_temp_c = -1;
+  uint16_t error_code = 0;
 };
 
-class JointCsvLogger
-{
+class JointCsvLogger {
 public:
-    JointCsvLogger() = default;
-    ~JointCsvLogger();
+  JointCsvLogger() = default;
+  ~JointCsvLogger();
 
-    bool open(const std::string &path, const RuntimeProfile &profile, const JointHandle &jh, const JointPlan &plan,
-              const Trajectory &traj);
-    void write(const LogSample &sample);
-    void close();
+  bool open(const std::string &path, const RuntimeProfile &profile,
+            const JointHandle &jh, const JointPlan &plan,
+            const Trajectory &traj);
 
-    const std::string &path() const noexcept;
-    bool is_open() const noexcept;
+  /// Open a generic telemetry log that is not tied to a trajectory. Used for
+  /// free-running recording of manual moves, holds, backdriving, etc. Writes
+  /// the same column layout as open() so the same tooling can parse it.
+  bool open_plain(const std::string &path, const RuntimeProfile &profile,
+                  const JointHandle &jh, int32_t min_counts, int32_t max_counts,
+                  int32_t start_counts);
 
-    JointCsvLogger(const JointCsvLogger &) = delete;
-    JointCsvLogger &operator=(const JointCsvLogger &) = delete;
-    JointCsvLogger(JointCsvLogger &&) = delete;
-    JointCsvLogger &operator=(JointCsvLogger &&) = delete;
+  void write(const LogSample &sample);
+  void close();
+
+  const std::string &path() const noexcept;
+  bool is_open() const noexcept;
+
+  JointCsvLogger(const JointCsvLogger &) = delete;
+  JointCsvLogger &operator=(const JointCsvLogger &) = delete;
+  JointCsvLogger(JointCsvLogger &&) = delete;
+  JointCsvLogger &operator=(JointCsvLogger &&) = delete;
 
 private:
-    void flush_active_batch();
-    void writer_main();
-    void write_batch(const std::vector<LogSample> &batch);
+  void flush_active_batch();
+  void writer_main();
+  void write_batch(const std::vector<LogSample> &batch);
 
-    FILE *m_file = nullptr;
-    std::string m_path;
-    std::vector<char> m_buffer;
-    std::vector<LogSample> m_active_samples;
-    std::vector<LogSample> m_pending_samples;
-    std::thread m_writer_thread;
-    std::mutex m_mutex;
-    std::condition_variable m_cv;
-    bool m_stop_requested = false;
-    bool m_pending_ready = false;
-    int m_encoder_bits = 0;
+  FILE *m_file = nullptr;
+  std::string m_path;
+  std::vector<char> m_buffer;
+  std::vector<LogSample> m_active_samples;
+  std::vector<LogSample> m_pending_samples;
+  std::thread m_writer_thread;
+  std::mutex m_mutex;
+  std::condition_variable m_cv;
+  bool m_stop_requested = false;
+  bool m_pending_ready = false;
+  int m_encoder_bits = 0;
 };
 
 std::string make_run_log_dir(const RuntimeProfile &profile);

@@ -17,33 +17,31 @@ class QComboBox;
 class QLabel;
 QT_END_NAMESPACE
 
-namespace actuator_test::gui
-{
+namespace actuator_test::gui {
 
 /// Panel displaying drive-level diagnostics: temperatures, fault codes,
 /// homing status, and limit information.
-class DrivesDiagnosticsPanel : public QWidget
-{
-    Q_OBJECT
+class DrivesDiagnosticsPanel : public QWidget {
+  Q_OBJECT
 
 public:
-    explicit DrivesDiagnosticsPanel(QWidget *parent = nullptr);
+  explicit DrivesDiagnosticsPanel(QWidget *parent = nullptr);
 
-    void setJoints(const std::vector<JointInfo> &joints);
-    void updateTelemetry(const std::vector<JointTelemetry> &joints);
+  void setJoints(const std::vector<JointInfo> &joints);
+  void updateTelemetry(const std::vector<JointTelemetry> &joints);
 
 private slots:
-    void onJointSelectionChanged(int index);
+  void onJointSelectionChanged(int index);
 
 private:
-    void rebuildDiagnosticsTable();
+  void rebuildDiagnosticsTable();
 
-    QComboBox *m_joint_combo = nullptr;
-    QTableWidget *m_diagnostics_table = nullptr;
-    QLabel *m_status_label = nullptr;
-    QLabel *m_homing_status_label = nullptr;
-    std::vector<JointInfo> m_joints;
-    std::vector<JointTelemetry> m_current_telemetry;
+  QComboBox *m_joint_combo = nullptr;
+  QTableWidget *m_diagnostics_table = nullptr;
+  QLabel *m_status_label = nullptr;
+  QLabel *m_homing_status_label = nullptr;
+  std::vector<JointInfo> m_joints;
+  std::vector<JointTelemetry> m_current_telemetry;
 };
 
 } // namespace actuator_test::gui

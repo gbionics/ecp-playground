@@ -14,86 +14,79 @@
 #include <variant>
 #include <vector>
 
-namespace actuator_test::gui
-{
+namespace actuator_test::gui {
 
 /// Connect to the bus using the given device-config TOML and bring all joints
 /// to a safe idle state.
-struct ConnectCommand
-{
-    std::string config_path;
+struct ConnectCommand {
+  std::string config_path;
 };
 
 /// Idle every drive and tear the bus down.
-struct DisconnectCommand
-{
-};
+struct DisconnectCommand {};
 
 /// Continuous manual jog of a single joint at a velocity in deg/s.  Send a
 /// velocity of 0 to stop.  The controller integrates and clamps to soft limits.
-struct JogCommand
-{
-    std::size_t joint = 0;
-    double velocity_deg_s = 0.0;
+struct JogCommand {
+  std::size_t joint = 0;
+  double velocity_deg_s = 0.0;
 };
 
 /// Smoothly drive one joint to an absolute target angle (used by homing and
 /// "go to centre").  Clamped to soft limits.
-struct GoToCommand
-{
-    std::size_t joint = 0;
-    double target_deg = 0.0;
-    double speed_deg_s = 0.0; ///< <=0 uses the profile default approach speed.
+struct GoToCommand {
+  std::size_t joint = 0;
+  double target_deg = 0.0;
+  double speed_deg_s = 0.0; ///< <=0 uses the profile default approach speed.
 };
 
 /// Begin or end a backdrive limit-capture session for a set of joints.  While
 /// active the controller idles the drives and tracks the min/max travelled.
-struct CaptureLimitsCommand
-{
-    std::vector<std::size_t> joints;
-    bool start = true; ///< true = begin capture, false = finish and keep.
+struct CaptureLimitsCommand {
+  std::vector<std::size_t> joints;
+  bool start = true; ///< true = begin capture, false = finish and keep.
 };
 
 /// Override the soft limits of a joint explicitly (deg).
-struct SetLimitsCommand
-{
-    std::size_t joint = 0;
-    double min_deg = 0.0;
-    double max_deg = 0.0;
+struct SetLimitsCommand {
+  std::size_t joint = 0;
+  double min_deg = 0.0;
+  double max_deg = 0.0;
 };
 
 /// Reset one joint's learned envelope to its current position.
-struct ResetLimitsCommand
-{
-    std::size_t joint = 0;
+struct ResetLimitsCommand {
+  std::size_t joint = 0;
 };
 
 /// Start playing a parametric trajectory across the selected joints.
-struct StartTrajectoryCommand
-{
-    std::vector<std::size_t> joints;
-    TrajectoryMode mode = TrajectoryMode::Sin;
-    bool enable_logging = true;
+struct StartTrajectoryCommand {
+  std::vector<std::size_t> joints;
+  TrajectoryMode mode = TrajectoryMode::Sin;
+  bool enable_logging = true;
 };
 
 /// Stop any running trajectory and return to hold/idle.
-struct StopCommand
-{
+struct StopCommand {};
+
+/// Start or stop free-running CSV recording of all joints, independent of any
+/// trajectory. Works in every state so manual moves, holds and backdriving can
+/// be captured for later analysis.
+struct RecordCommand {
+  bool start = true;
 };
 
 /// Pause a running trajectory and hold current joint positions while staying
 /// engaged (no idle/disconnect required).
-struct PauseCommand
-{
-};
+struct PauseCommand {};
 
 /// Terminate the worker thread (application shutdown).
-struct ShutdownCommand
-{
-};
+struct ShutdownCommand {};
 
-using Command = std::variant<ConnectCommand, DisconnectCommand, JogCommand, GoToCommand, CaptureLimitsCommand,
-                             SetLimitsCommand, ResetLimitsCommand, StartTrajectoryCommand, StopCommand, PauseCommand,
-                             ShutdownCommand>;
+using Command =
+    std::variant<ConnectCommand, DisconnectCommand, JogCommand, GoToCommand,
+                 CaptureLimitsCommand, SetLimitsCommand, ResetLimitsCommand,
+                 StartTrajectoryCommand, StopCommand, PauseCommand,
+                 RecordCommand, ShutdownCommand>;
 
 } // namespace actuator_test::gui
