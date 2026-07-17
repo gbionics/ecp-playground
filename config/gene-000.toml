@@ -507,4 +507,3 @@ max_torque      = 1000
 PVT_KP          = 10000
 PVT_KD          = 1000
 debug           = false
-encoder_bits   = 13
