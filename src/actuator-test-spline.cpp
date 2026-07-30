@@ -49,10 +49,10 @@ int main(int argc, char *argv[])
 
     try_enable_realtime_scheduler(profile);
 
-    const std::string ifname = get_ethercat_interface();
+    const std::string ifname = cfg->ifname();
     if (ifname.empty())
     {
-        std::cerr << "No EtherCAT interface found.\n";
+        std::cerr << "No EtherCAT interface configured. Set [[ethercat]] ifname in '" << cfg_path << "'.\n";
         return 1;
     }
 

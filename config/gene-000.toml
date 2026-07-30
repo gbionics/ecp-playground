@@ -47,6 +47,7 @@
 [[ethercat]]
 init_state              = "EC_STATE_OPERATIONAL"
 default_recovery_state  = "EC_STATE_OPERATIONAL"
+ifname                  = "eth0"
 
 # -----------------------------------------------------------------------------
 # DS402 operation modes
@@ -75,7 +76,7 @@ OP_CST  = 0x0A # Cyclic Synchronous Torque
 vendor_id      = 0x00202008
 operation_mode = "OP_PVT"
 debug          = true
-
+use_dcsync0    = false
 # -----------------------------------------------------------------------------
 # Model defaults
 # -----------------------------------------------------------------------------

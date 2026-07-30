@@ -14,8 +14,8 @@ include(FetchContent)
 
 FetchContent_Declare(
     ethercat_primer
-    GIT_REPOSITORY  git@github.com:gbionics/ethercat-primer.git
-    GIT_TAG         fix-novanta
+    GIT_REPOSITORY  https://github.com/gbionics/ethercat-primer.git
+    GIT_TAG         dc-sync-config
 )
 
 FetchContent_MakeAvailable(ethercat_primer)
