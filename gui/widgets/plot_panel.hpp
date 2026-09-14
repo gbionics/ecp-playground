@@ -111,6 +111,8 @@ private:
     Velocity,
     RefVelocity,
     FollowingError,
+    Current,
+    Torque,
   };
 
   /// Overall layout of the plotting area.

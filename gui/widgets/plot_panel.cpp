@@ -268,6 +268,10 @@ PlotPanel::PlotPanel(QWidget *parent) : QWidget(parent) {
                    static_cast<int>(Signal::RefVelocity));
     combo->addItem(signalName(Signal::FollowingError),
                    static_cast<int>(Signal::FollowingError));
+    combo->addItem(signalName(Signal::Current),
+             static_cast<int>(Signal::Current));
+    combo->addItem(signalName(Signal::Torque),
+             static_cast<int>(Signal::Torque));
     combo->setCurrentIndex(combo->findData(static_cast<int>(def)));
   };
 
@@ -395,12 +399,17 @@ QString PlotPanel::signalName(Signal s) {
     return tr("Ref velocity [deg/s]");
   case Signal::FollowingError:
     return tr("Following error [deg]");
+  case Signal::Current:
+    return tr("Current [A]");
+  case Signal::Torque:
+    return tr("Torque [Nm]");
   }
   return {};
 }
 
 bool PlotPanel::signalIsSymmetric(Signal s) {
-  return s == Signal::Error || s == Signal::FollowingError;
+  return s == Signal::Error || s == Signal::FollowingError ||
+         s == Signal::Current || s == Signal::Torque;
 }
 
 double PlotPanel::signalValue(const JointTelemetry &j, Signal s) {
@@ -417,6 +426,10 @@ double PlotPanel::signalValue(const JointTelemetry &j, Signal s) {
     return j.ref_velocity_deg_s;
   case Signal::FollowingError:
     return j.following_error_deg;
+  case Signal::Current:
+    return j.current_a;
+  case Signal::Torque:
+    return j.torque_nm;
   }
   return 0.0;
 }
@@ -496,8 +509,9 @@ void PlotPanel::rebuildCharts() {
   // Toggle which controls are relevant for the active mode.
   const bool overlay = (m_mode == ViewMode::Overlay);
   const bool xy = (m_mode == ViewMode::XY);
-  m_signal_label->setVisible(overlay);
-  m_signal_combo->setVisible(overlay);
+  const bool signal_selectable = overlay || m_mode == ViewMode::Stacked;
+  m_signal_label->setVisible(signal_selectable);
+  m_signal_combo->setVisible(signal_selectable);
   m_x_signal_label->setVisible(xy);
   m_x_signal_combo->setVisible(xy);
   m_y_signal_label->setVisible(xy);
@@ -550,6 +564,13 @@ void PlotPanel::rebuildCharts() {
     const int s_foll = m_charts[c_foll]->addSeries(tr("following error"),
                                                    QColor(220, 80, 160));
 
+    const int c_current = add_chart(tr("Current [A]"), true, 1);
+    const int s_current =
+      m_charts[c_current]->addSeries(tr("current"), QColor(240, 180, 70));
+    const int c_torque = add_chart(tr("Torque [Nm]"), true, 1);
+    const int s_torque =
+      m_charts[c_torque]->addSeries(tr("torque"), QColor(90, 210, 210));
+
     if (j >= 0) {
       m_items.push_back({c_pos, s_ref, j, Signal::PositionRef,
                          Signal::PositionActual, false});
@@ -563,6 +584,10 @@ void PlotPanel::rebuildCharts() {
           {c_vel, s_vact, j, Signal::Velocity, Signal::PositionActual, false});
       m_items.push_back({c_foll, s_foll, j, Signal::FollowingError,
                          Signal::PositionActual, false});
+      m_items.push_back({c_current, s_current, j, Signal::Current,
+             Signal::PositionActual, false});
+      m_items.push_back({c_torque, s_torque, j, Signal::Torque,
+             Signal::PositionActual, false});
     }
     break;
   }
@@ -580,17 +605,15 @@ void PlotPanel::rebuildCharts() {
   }
 
   case ViewMode::Stacked: {
+    const Signal sig = signalAt(m_signal_combo);
     for (int j : joints) {
       const QString jn =
           (j < m_joint_names.size()) ? m_joint_names[j] : QString::number(j);
-      const int c = add_chart(tr("%1 — position [deg]").arg(jn), false, 1);
-      const int s_ref =
-          m_charts[c]->addSeries(tr("reference"), QColor(90, 120, 170));
-      const int s_act = m_charts[c]->addSeries(tr("actual"), jointColor(j));
+      const int c = add_chart(tr("%1 — %2").arg(jn, signalName(sig)),
+                  signalIsSymmetric(sig), 1);
+      const int series = m_charts[c]->addSeries(signalName(sig), jointColor(j));
       m_items.push_back(
-          {c, s_ref, j, Signal::PositionRef, Signal::PositionActual, false});
-      m_items.push_back(
-          {c, s_act, j, Signal::PositionActual, Signal::PositionActual, false});
+        {c, series, j, sig, Signal::PositionActual, false});
     }
     break;
   }

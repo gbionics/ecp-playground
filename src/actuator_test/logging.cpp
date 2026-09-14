@@ -12,12 +12,35 @@
 #include <sstream>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <unistd.h>
 
 namespace actuator_test {
 
 namespace {
 
 constexpr std::size_t k_log_batch_samples = 512;
+
+void set_log_permissions(const std::string &path, mode_t mode) {
+  ::chmod(path.c_str(), mode);
+  if (::geteuid() != 0) {
+    return;
+  }
+
+  const char *uid_text = std::getenv("SUDO_UID");
+  const char *gid_text = std::getenv("SUDO_GID");
+  if (uid_text == nullptr || gid_text == nullptr) {
+    return;
+  }
+
+  char *uid_end = nullptr;
+  char *gid_end = nullptr;
+  const unsigned long uid = std::strtoul(uid_text, &uid_end, 10);
+  const unsigned long gid = std::strtoul(gid_text, &gid_end, 10);
+  if (uid_end != uid_text && *uid_end == '\0' && gid_end != gid_text &&
+      *gid_end == '\0') {
+    ::chown(path.c_str(), static_cast<uid_t>(uid), static_cast<gid_t>(gid));
+  }
+}
 
 bool mkdir_if_needed(const std::string &path) {
   if (path.empty()) {
@@ -60,6 +83,7 @@ bool JointCsvLogger::open(const std::string &path,
   if (m_file == nullptr) {
     return false;
   }
+  set_log_permissions(path, 0664);
 
   m_buffer.resize(profile.log_file_buffer_bytes);
   std::setvbuf(m_file, m_buffer.data(), _IOFBF, m_buffer.size());
@@ -88,6 +112,10 @@ bool JointCsvLogger::open(const std::string &path,
                jh.operation_mode_name.c_str());
   std::fprintf(m_file, "# encoder_bits, %u\n",
                static_cast<unsigned>(jh.driver->encoder_bits()));
+  std::fprintf(m_file, "# rated_current_a, %.10f\n",
+               jh.driver->rated_current_a());
+  std::fprintf(m_file, "# torque_constant_nm_per_a, %.10f\n",
+               jh.torque_constant_nm_per_a);
   std::fprintf(m_file, "# pvt_kp, %d\n", jh.pvt_kp);
   std::fprintf(m_file, "# pvt_kd, %d\n", jh.pvt_kd);
   std::fprintf(m_file, "# min_counts, %d\n", plan.min_counts);
@@ -118,8 +146,8 @@ bool JointCsvLogger::open(const std::string &path,
   std::fprintf(
       m_file,
       "t_s,phase,phase_t_s,ref_raw_counts,ref_filt_counts,actual_counts,"
-      "ref_raw_deg,ref_filt_deg,actual_deg,motor_temp_c,drive_temp_c,error_"
-      "code\n");
+      "ref_raw_deg,ref_filt_deg,actual_deg,current_a,torque_nm,motor_temp_c,"
+      "drive_temp_c,error_code\n");
 
   m_writer_thread = std::thread(&JointCsvLogger::writer_main, this);
 
@@ -135,6 +163,7 @@ bool JointCsvLogger::open_plain(const std::string &path,
   if (m_file == nullptr) {
     return false;
   }
+  set_log_permissions(path, 0664);
 
   m_buffer.resize(profile.log_file_buffer_bytes);
   std::setvbuf(m_file, m_buffer.data(), _IOFBF, m_buffer.size());
@@ -164,6 +193,10 @@ bool JointCsvLogger::open_plain(const std::string &path,
                jh.operation_mode_name.c_str());
   std::fprintf(m_file, "# encoder_bits, %u\n",
                static_cast<unsigned>(jh.driver->encoder_bits()));
+  std::fprintf(m_file, "# rated_current_a, %.10f\n",
+               jh.driver->rated_current_a());
+  std::fprintf(m_file, "# torque_constant_nm_per_a, %.10f\n",
+               jh.torque_constant_nm_per_a);
   std::fprintf(m_file, "# pvt_kp, %d\n", jh.pvt_kp);
   std::fprintf(m_file, "# pvt_kd, %d\n", jh.pvt_kd);
   std::fprintf(m_file, "# min_counts, %d\n", min_counts);
@@ -183,8 +216,8 @@ bool JointCsvLogger::open_plain(const std::string &path,
   std::fprintf(
       m_file,
       "t_s,phase,phase_t_s,ref_raw_counts,ref_filt_counts,actual_counts,"
-      "ref_raw_deg,ref_filt_deg,actual_deg,motor_temp_c,drive_temp_c,error_"
-      "code\n");
+      "ref_raw_deg,ref_filt_deg,actual_deg,current_a,torque_nm,motor_temp_c,"
+      "drive_temp_c,error_code\n");
 
   m_writer_thread = std::thread(&JointCsvLogger::writer_main, this);
 
@@ -264,15 +297,16 @@ void JointCsvLogger::write_batch(const std::vector<LogSample> &batch) {
     return;
   }
 
-  char line[256];
+  char line[320];
   for (const LogSample &s : batch) {
     const int written = std::snprintf(
         line, sizeof(line),
-        "%.9f,%d,%.9f,%.6f,%.6f,%d,%.9f,%.9f,%.9f,%d,%d,%u\n", s.t_s, s.phase,
+        "%.9f,%d,%.9f,%.6f,%.6f,%d,%.9f,%.9f,%.9f,%.9f,%.9f,%d,%d,%u\n",
+        s.t_s, s.phase,
         s.phase_t_s, s.ref_raw_counts, s.ref_filt_counts, s.actual_counts,
         counts2deg(static_cast<int32_t>(s.ref_raw_counts), m_encoder_bits),
         counts2deg(static_cast<int32_t>(s.ref_filt_counts), m_encoder_bits),
-        counts2deg(s.actual_counts, m_encoder_bits),
+        counts2deg(s.actual_counts, m_encoder_bits), s.current_a, s.torque_nm,
         static_cast<int>(s.motor_temp_c), static_cast<int>(s.drive_temp_c),
         static_cast<unsigned>(s.error_code));
     if (written > 0) {
@@ -293,6 +327,7 @@ std::string make_run_log_dir(const RuntimeProfile &profile) {
         root_dir.c_str(), errno);
     return {};
   }
+  set_log_permissions(root_dir, 0775);
 
   const std::time_t now = std::time(nullptr);
   std::tm tm_buf{};
@@ -308,6 +343,7 @@ std::string make_run_log_dir(const RuntimeProfile &profile) {
         dir.c_str(), errno);
     return {};
   }
+  set_log_permissions(dir, 0775);
 
   return dir;
 }
