@@ -110,6 +110,7 @@ private:
   void handleCommand(const DisconnectCommand &c);
   void handleCommand(const JogCommand &c);
   void handleCommand(const GoToCommand &c);
+  void handleCommand(const CurrentCommand &c);
   void handleCommand(const CaptureLimitsCommand &c);
   void handleCommand(const SetLimitsCommand &c);
   void handleCommand(const ResetLimitsCommand &c);

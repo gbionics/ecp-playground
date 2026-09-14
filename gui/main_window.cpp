@@ -355,6 +355,10 @@ void MainWindow::wireSignals() {
           });
   connect(m_jog, &JogPanel::stopRequested, this,
           [this] { m_worker->post(StopCommand{}); });
+  connect(m_jog, &JogPanel::currentRequested, this,
+          [this](std::size_t j, double a) {
+            m_worker->post(CurrentCommand{j, a});
+          });
 
   // Enhanced limits panel signals
   connect(m_enhanced_limits, &EnhancedLimitsPanel::captureToggled, this,

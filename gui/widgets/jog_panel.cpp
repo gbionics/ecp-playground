@@ -93,7 +93,30 @@ JogPanel::JogPanel(QWidget *parent) : QWidget(parent) {
   go_hold->setAccessibleName(tr("Go to target and hold"));
   target_row->addWidget(go_hold);
   layout->addLayout(target_row);
+
+  // --- Constant-current test: bypass position/velocity feedback. ---
+  auto *current_row = new QHBoxLayout();
+  auto *current_label = new QLabel(tr("&Current:"));
+  current_row->addWidget(current_label);
+  m_current_spin = new QDoubleSpinBox();
+  m_current_spin->setRange(-100.0, 100.0);
+  m_current_spin->setDecimals(2);
+  m_current_spin->setSuffix(tr(" A"));
+  m_current_spin->setAccessibleName(tr("Target current in amperes"));
+  current_label->setBuddy(m_current_spin);
+  current_row->addWidget(m_current_spin, 1);
+  auto *apply_current = new QPushButton(tr("A&pply current"));
+  apply_current->setToolTip(
+      tr("Command a constant current, bypassing position/velocity feedback "
+         "(KP=KD=0), for torque-constant testing. Press Stop to release."));
+  apply_current->setAccessibleName(tr("Apply target current"));
+  current_row->addWidget(apply_current);
+  layout->addLayout(current_row);
   layout->addStretch(1);
+
+  connect(apply_current, &QPushButton::clicked, this, [this] {
+    emit currentRequested(currentJoint(), m_current_spin->value());
+  });
 
   connect(go_hold, &QPushButton::clicked, this, [this] {
     emit goToRequested(currentJoint(), m_target_spin->value(),

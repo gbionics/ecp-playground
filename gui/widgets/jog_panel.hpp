@@ -35,6 +35,7 @@ signals:
   void jogRequested(std::size_t joint, double velocity_deg_s);
   void goToRequested(std::size_t joint, double target_deg, double speed_deg_s);
   void stopRequested();
+  void currentRequested(std::size_t joint, double target_current_a);
 
 private:
   std::size_t currentJoint() const;
@@ -43,6 +44,7 @@ private:
   QComboBox *m_joint_combo = nullptr;
   QDoubleSpinBox *m_speed_spin = nullptr;
   QDoubleSpinBox *m_target_spin = nullptr;
+  QDoubleSpinBox *m_current_spin = nullptr;
   std::vector<JointInfo> m_joints;
 };
 

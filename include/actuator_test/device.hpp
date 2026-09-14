@@ -39,6 +39,9 @@ public:
 
   virtual void set_target_position(int32_t value) noexcept = 0;
   virtual void set_target_velocity(int32_t value) noexcept = 0;
+  // Current command in ‰ of rated current (DS402 "Target Torque", 0x6071);
+  // on this hardware the register drives current directly, not physical torque.
+  virtual void set_target_torque(int16_t value_permille) noexcept = 0;
   virtual void update_operation_mode(int8_t op_mode) noexcept = 0;
   virtual void idle() noexcept = 0;
 

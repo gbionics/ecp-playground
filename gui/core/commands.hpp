@@ -40,6 +40,14 @@ struct GoToCommand {
   double speed_deg_s = 0.0; ///< <=0 uses the profile default approach speed.
 };
 
+/// Apply a constant current setpoint to a single joint, bypassing position and
+/// velocity feedback (KP=KD=0), for constant-torque bench testing.  Send
+/// target_current_a = 0 to stop and return to a held position.
+struct CurrentCommand {
+  std::size_t joint = 0;
+  double target_current_a = 0.0;
+};
+
 /// Begin or end a backdrive limit-capture session for a set of joints.  While
 /// active the controller idles the drives and tracks the min/max travelled.
 struct CaptureLimitsCommand {
@@ -85,8 +93,8 @@ struct ShutdownCommand {};
 
 using Command =
     std::variant<ConnectCommand, DisconnectCommand, JogCommand, GoToCommand,
-                 CaptureLimitsCommand, SetLimitsCommand, ResetLimitsCommand,
-                 StartTrajectoryCommand, StopCommand, PauseCommand,
-                 RecordCommand, ShutdownCommand>;
+                 CurrentCommand, CaptureLimitsCommand, SetLimitsCommand,
+                 ResetLimitsCommand, StartTrajectoryCommand, StopCommand,
+                 PauseCommand, RecordCommand, ShutdownCommand>;
 
 } // namespace actuator_test::gui

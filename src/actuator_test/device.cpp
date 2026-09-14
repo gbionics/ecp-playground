@@ -109,6 +109,10 @@ public:
     m_driver->set_target_velocity(value);
   }
 
+  void set_target_torque(int16_t value_permille) noexcept override {
+    m_driver->set_target_torque(value_permille);
+  }
+
   void update_operation_mode(int8_t op_mode) noexcept override {
     m_driver->update_operation_mode(op_mode);
   }
@@ -175,6 +179,14 @@ public:
 
   void set_target_velocity(int32_t value) noexcept override {
     m_driver->set_target_velocity(value);
+  }
+
+  void set_target_torque(int16_t value_permille) noexcept override {
+    // Novanta has no DS402 TargetTorque PDO entry; it commands current
+    // directly in amperes via CurrentQuadratureSetPoint.
+    const double amps =
+        static_cast<double>(value_permille) / 1000.0 * rated_current_a();
+    m_driver->set_current_quadrature_setpoint(static_cast<float>(amps));
   }
 
   void update_operation_mode(int8_t op_mode) noexcept override {
