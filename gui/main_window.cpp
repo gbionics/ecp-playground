@@ -759,17 +759,17 @@ void MainWindow::exportTelemetrySnapshot() {
          "deg_s,"
          "following_error_deg,min_limit_deg,max_limit_deg,soft_min_deg,soft_"
          "max_deg,"
-         "motor_temp_c,drive_temp_c,torque_percent,power_watts,phase,error_"
-         "code\n";
+         "current_a,torque_nm,motor_temp_c,drive_temp_c,torque_percent,power_"
+         "watts,phase,error_code\n";
   for (const auto &jt : frame.joints) {
     out << QString::fromStdString(jt.name) << ',' << jt.reference_deg << ','
         << jt.actual_deg << ',' << jt.error_deg << ',' << jt.velocity_deg_s
         << ',' << jt.ref_velocity_deg_s << ',' << jt.following_error_deg << ','
         << jt.min_limit_deg << ',' << jt.max_limit_deg << ','
         << jt.soft_min_limit_deg << ',' << jt.soft_max_limit_deg << ','
-        << jt.motor_temp_c << ',' << jt.drive_temp_c << ',' << jt.torque_percent
-        << ',' << jt.power_watts << ',' << jt.phase << ',' << jt.error_code
-        << '\n';
+        << jt.current_a << ',' << jt.torque_nm << ',' << jt.motor_temp_c << ','
+        << jt.drive_temp_c << ',' << jt.torque_percent << ',' << jt.power_watts
+        << ',' << jt.phase << ',' << jt.error_code << '\n';
   }
   file.close();
 

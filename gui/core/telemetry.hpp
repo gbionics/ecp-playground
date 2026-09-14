@@ -71,6 +71,8 @@ struct JointTelemetry {
   CiA402State cia402_state = CiA402State::NotReadyToSwitchOn;
   bool homed = false;          ///< Has homing procedure completed.
   bool homing_active = false;  ///< Homing in progress.
+  double current_a = 0.0;      ///< Estimated phase current from DS402 torque.
+  double torque_nm = 0.0;      ///< Output torque using the model's KT_OUT.
   double torque_percent = 0.0; ///< Current torque as % of rated.
   double power_watts = 0.0;    ///< Estimated power consumption.
 };

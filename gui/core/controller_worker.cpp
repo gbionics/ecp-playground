@@ -1027,6 +1027,8 @@ void ControllerWorker::controlTick() {
         sample.ref_raw_counts = ref_counts;
         sample.ref_filt_counts = filtered;
         sample.actual_counts = actual_counts;
+        sample.current_a = d.actual_current_a();
+        sample.torque_nm = sample.current_a * jh.torque_constant_nm_per_a;
         sample.motor_temp_c = motor_t;
         sample.drive_temp_c = drive_t;
         sample.error_code = err;
@@ -1048,6 +1050,8 @@ void ControllerWorker::controlTick() {
       sample.ref_raw_counts = ct.cmd_counts;
       sample.ref_filt_counts = ct.cmd_counts;
       sample.actual_counts = d.actual_position();
+      sample.current_a = d.actual_current_a();
+      sample.torque_nm = sample.current_a * jh.torque_constant_nm_per_a;
       sample.motor_temp_c =
           d.has_temperature_feedback() ? d.motor_temperature() : -1;
       sample.drive_temp_c =
@@ -1134,6 +1138,12 @@ void ControllerWorker::publishTelemetry() {
       jt.actual_deg = actuator_test::counts2deg(d.actual_position(), bits);
       jt.error_deg = jt.reference_deg - jt.actual_deg;
       jt.velocity_deg_s = actuator_test::counts2deg(d.actual_velocity(), bits);
+          jt.current_a = d.actual_current_a();
+        jt.torque_nm = jt.current_a * jh.torque_constant_nm_per_a;
+          const double rated_current_a = d.rated_current_a();
+          jt.torque_percent = rated_current_a > 0.0
+                      ? jt.current_a / rated_current_a * 100.0
+                      : 0.0;
 
       // Acceleration: (current_velocity - previous_velocity) / dt
       if (dt > 0.0) {

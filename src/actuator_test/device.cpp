@@ -11,6 +11,20 @@ namespace actuator_test {
 
 namespace {
 
+double torque_constant_for_model(std::string_view model) noexcept {
+  if (model == "X10-200")
+    return 3.3;
+  if (model == "X8-120")
+    return 2.0;
+  if (model == "X6-60")
+    return 1.5;
+  if (model == "X4-36")
+    return 1.2;
+  if (model == "X4-10")
+    return 0.8;
+  return 0.0;
+}
+
 void populate_common_fields(JointHandle &jh, const ecp::DeviceConfig &cfg,
                             const std::string &device_name,
                             const std::string &driver_name) {
@@ -18,6 +32,7 @@ void populate_common_fields(JointHandle &jh, const ecp::DeviceConfig &cfg,
   jh.driver_name = driver_name;
   jh.alias = static_cast<uint16_t>(cfg.get<int>(device_name, "alias", 0));
   jh.model = cfg.get<std::string>(device_name, "model", "");
+  jh.torque_constant_nm_per_a = torque_constant_for_model(jh.model);
   jh.operation_mode_name =
       cfg.get<std::string>(device_name, "operation_mode", "");
   if (jh.operation_mode_name.empty()) {
@@ -53,6 +68,15 @@ public:
 
   int32_t actual_velocity() const noexcept override {
     return m_driver->actual_velocity();
+  }
+
+  double actual_current_a() const noexcept override {
+    return static_cast<double>(m_driver->actual_torque()) / 1000.0 *
+           rated_current_a();
+  }
+
+  double rated_current_a() const noexcept override {
+    return static_cast<double>(m_driver->rated_current()) / 1000.0;
   }
 
   uint16_t status() const noexcept override { return m_driver->status(); }
@@ -119,6 +143,14 @@ public:
 
   int32_t actual_velocity() const noexcept override {
     return m_driver->actual_velocity();
+  }
+
+  double actual_current_a() const noexcept override {
+    return static_cast<double>(m_driver->current_quadrature_value());
+  }
+
+  double rated_current_a() const noexcept override {
+    return static_cast<double>(m_driver->motor_rated_current());
   }
 
   uint16_t status() const noexcept override { return m_driver->status(); }

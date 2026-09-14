@@ -495,6 +495,9 @@ void run_trajectory_multi(std::vector<JointPlan> &plans, TrajectoryMode mode,
       sample.ref_raw_counts = ref_counts;
       sample.ref_filt_counts = filtered;
       sample.actual_counts = actual_counts;
+        sample.current_a = d.actual_current_a();
+        sample.torque_nm =
+          sample.current_a * p.jh->torque_constant_nm_per_a;
       sample.motor_temp_c = motor_t;
       sample.drive_temp_c = drive_t;
       sample.error_code = err;

@@ -24,6 +24,8 @@ struct LogSample {
   double ref_raw_counts = 0.0;
   double ref_filt_counts = 0.0;
   int32_t actual_counts = 0;
+  double current_a = 0.0;
+  double torque_nm = 0.0;
   int16_t motor_temp_c = -1;
   int16_t drive_temp_c = -1;
   uint16_t error_code = 0;
