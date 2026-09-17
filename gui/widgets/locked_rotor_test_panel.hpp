@@ -10,11 +10,13 @@
 
 #pragma once
 
+#include "actuator_test/external_daq.hpp"
 #include "core/controller_worker.hpp"
 #include "core/telemetry.hpp"
 
 #include <QDialog>
 #include <QString>
+#include <memory>
 #include <vector>
 
 QT_BEGIN_NAMESPACE
@@ -24,6 +26,8 @@ class QPushButton;
 class QLabel;
 class QTableWidget;
 class QCheckBox;
+class QLineEdit;
+class QScrollBar;
 QT_END_NAMESPACE
 
 namespace actuator_test::gui {
@@ -61,6 +65,8 @@ private:
     double avg_torque_nm = 0.0;
     double peak_current_a = 0.0;
     double peak_torque_nm = 0.0;
+    double ext_avg_torque_nm = 0.0; ///< External DAQ verification (if enabled).
+    double ext_avg_speed_rpm = 0.0;
   };
 
   void onStartClicked();
@@ -73,6 +79,11 @@ private:
   void exportResultsCsv();
   std::size_t selectedJoint() const;
   void updateStartEnabled();
+  void updateExternalDaqAvailability();
+
+  /// Applies the polarity inversion (if the checkbox is checked) so the
+  /// actually-commanded value matches what's shown in the chart/table.
+  double appliedCurrentA(double requested_a) const;
 
   QComboBox *m_joint_combo = nullptr;
   QDoubleSpinBox *m_start_spin = nullptr;
@@ -80,6 +91,7 @@ private:
   QDoubleSpinBox *m_step_spin = nullptr;
   QDoubleSpinBox *m_dwell_spin = nullptr;
   QCheckBox *m_return_sweep_check = nullptr;
+  QCheckBox *m_invert_current_check = nullptr;
   QCheckBox *m_confirm_check = nullptr;
   QPushButton *m_start_btn = nullptr;
   QPushButton *m_stop_btn = nullptr;
@@ -88,10 +100,30 @@ private:
   QTableWidget *m_results_table = nullptr;
   StripChart *m_current_chart = nullptr;
   StripChart *m_torque_chart = nullptr;
+  QLabel *m_current_value_label = nullptr;
+  QLabel *m_torque_value_label = nullptr;
+  StripChart *m_iv_chart = nullptr;
+  QScrollBar *m_time_scrollbar = nullptr;
+  QPushButton *m_live_btn = nullptr;
+  QDoubleSpinBox *m_window_spin = nullptr;
+  bool m_scrub_updating = false;
+
+  QCheckBox *m_ext_daq_check = nullptr;
+  QCheckBox *m_ext_invert_sign_check = nullptr;
+  QLineEdit *m_ext_analog_edit = nullptr;
+  QLineEdit *m_ext_digital_a_edit = nullptr;
+  QLineEdit *m_ext_digital_b_edit = nullptr;
+  QLabel *m_ext_daq_status_label = nullptr;
+  std::unique_ptr<actuator_test::ExternalDaqReader> m_external_daq;
+  double m_sum_ext_torque = 0.0;
+  double m_sum_ext_speed = 0.0;
+  int m_ext_sample_count = 0;
+  int m_series_ext_torque = -1;
 
   std::vector<JointInfo> m_joints;
   std::vector<double> m_steps_a;
   std::size_t m_step_index = 0;
+  std::size_t m_forward_step_count = 0; ///< Steps before the mirrored return leg.
   bool m_running = false;
   std::size_t m_active_joint = 0;
 
@@ -106,6 +138,10 @@ private:
   int m_series_cmd = -1;
   int m_series_current = -1;
   int m_series_torque = -1;
+  int m_series_iv_drive_up = -1;
+  int m_series_iv_drive_down = -1;
+  int m_series_iv_ext_up = -1;
+  int m_series_iv_ext_down = -1;
 };
 
 } // namespace actuator_test::gui

@@ -58,6 +58,26 @@ public:
   void setAxisTitles(const QString &x, const QString &y);
   void clearAll();
 
+  /// When enabled, Time-mode history is retained (capped by point count, not
+  /// by the rolling window) so it can be panned/scrolled through afterwards.
+  void setPannable(bool enabled) { m_pannable = enabled; }
+
+  /// Raises the retention cap used in pannable mode (default 2000).
+  void setMaxPoints(std::size_t n) { m_max_points = n; }
+
+  /// Stop auto-scrolling to the latest sample and instead show the window
+  /// ending at `end_x` (seconds). Only meaningful when pannable.
+  void setViewEnd(double end_x);
+
+  /// Resume auto-scrolling so the window always ends at the latest sample.
+  void followLatest();
+
+  bool isFollowingLatest() const { return m_follow_latest; }
+
+  /// Earliest/latest x seen across all series (0/0 if no data yet).
+  double dataMinX() const { return m_data_min_x; }
+  double dataMaxX() const { return m_data_max_x; }
+
 protected:
   void paintEvent(QPaintEvent *event) override;
 
@@ -77,6 +97,12 @@ private:
   double m_latest_x = 0.0;
   XAxis m_x_axis = XAxis::Time;
   std::size_t m_max_points = 2000;
+  bool m_pannable = false;
+  bool m_follow_latest = true;
+  double m_view_end_x = 0.0;
+  double m_data_min_x = 0.0;
+  double m_data_max_x = 0.0;
+  bool m_have_data = false;
 };
 
 /// The dockable plot panel.  Supports several view modes so multiple devices'

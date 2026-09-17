@@ -16,8 +16,12 @@
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QLabel>
+#include <QLineEdit>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QScrollArea>
+#include <QScrollBar>
+#include <QSplitter>
 #include <QTableWidget>
 #include <QTableWidgetItem>
 #include <QTextStream>
@@ -31,9 +35,28 @@ namespace actuator_test::gui {
 LockedRotorTestDialog::LockedRotorTestDialog(QWidget *parent)
     : QDialog(parent) {
   setWindowTitle(tr("Locked-Rotor Test"));
-  resize(760, 620);
+  // QDialog's window type suppresses minimize/maximize decorations on most
+  // window managers regardless of hints; force a normal top-level window so
+  // the title bar buttons actually work.
+  setWindowFlags(Qt::Window | Qt::WindowCloseButtonHint |
+                 Qt::WindowMinimizeButtonHint | Qt::WindowMaximizeButtonHint);
+  resize(1400, 850);
 
-  auto *layout = new QVBoxLayout(this);
+  auto *root_layout = new QVBoxLayout(this);
+  auto *splitter = new QSplitter(Qt::Horizontal, this);
+  root_layout->addWidget(splitter);
+
+  // --- Left: settings, controls, results ----------------------------------
+  auto *left_scroll = new QScrollArea();
+  left_scroll->setWidgetResizable(true);
+  left_scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+  left_scroll->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+  left_scroll->setMinimumWidth(380);
+  left_scroll->setMaximumWidth(460);
+  auto *left_panel = new QWidget();
+  auto *layout = new QVBoxLayout(left_panel);
+  left_scroll->setWidget(left_panel);
+  splitter->addWidget(left_scroll);
 
   auto *intro = new QLabel(
       tr("<b>Locked-rotor current sweep.</b> With the shaft mechanically "
@@ -83,11 +106,52 @@ LockedRotorTestDialog::LockedRotorTestDialog(QWidget *parent)
   m_return_sweep_check->setChecked(true);
   form->addRow(m_return_sweep_check);
 
+  m_invert_current_check = new QCheckBox(tr("Invert current polarity"));
+  form->addRow(m_invert_current_check);
+  auto *invert_current_hint = new QLabel(
+      tr("Flips physical rotation direction. Does not fix a sign mismatch "
+         "against the external sensor -- use \"Invert external sensor "
+         "sign\" below for that."));
+  invert_current_hint->setWordWrap(true);
+  invert_current_hint->setStyleSheet(QStringLiteral("color: gray; font-size: 11px;"));
+  form->addRow(invert_current_hint);
+
   m_confirm_check = new QCheckBox(
       tr("I confirm the rotor is mechanically locked / blocked"));
   form->addRow(m_confirm_check);
 
   layout->addWidget(config_box);
+
+  // --- Optional external DAQ verification ---------------------------------
+  auto *ext_box = new QGroupBox(tr("External DAQ verification (optional)"));
+  auto *ext_form = new QFormLayout(ext_box);
+
+  m_ext_daq_check = new QCheckBox(tr("Cross-check against a torque sensor / encoder"));
+  ext_form->addRow(m_ext_daq_check);
+
+  m_ext_invert_sign_check = new QCheckBox(tr("Invert external sensor sign"));
+  ext_form->addRow(m_ext_invert_sign_check);
+  auto *invert_sign_hint = new QLabel(
+      tr("Aligns the sensor's own convention (e.g. CCW-positive) with "
+         "positive commanded current."));
+  invert_sign_hint->setWordWrap(true);
+  invert_sign_hint->setStyleSheet(QStringLiteral("color: gray; font-size: 11px;"));
+  ext_form->addRow(invert_sign_hint);
+
+  m_ext_analog_edit = new QLineEdit(QStringLiteral("Dev1/ai28"));
+  ext_form->addRow(tr("Torque sensor AI channel:"), m_ext_analog_edit);
+  m_ext_digital_a_edit = new QLineEdit(QStringLiteral("Dev1/port0/line5"));
+  ext_form->addRow(tr("Encoder quadrature A line:"), m_ext_digital_a_edit);
+  m_ext_digital_b_edit = new QLineEdit(QStringLiteral("Dev1/port0/line6"));
+  ext_form->addRow(tr("Encoder quadrature B line:"), m_ext_digital_b_edit);
+
+  m_ext_daq_status_label = new QLabel();
+  m_ext_daq_status_label->setWordWrap(true);
+  ext_form->addRow(m_ext_daq_status_label);
+
+  layout->addWidget(ext_box);
+
+  updateExternalDaqAvailability();
 
   // --- Controls ------------------------------------------------------------
   auto *btn_row = new QHBoxLayout();
@@ -100,41 +164,142 @@ LockedRotorTestDialog::LockedRotorTestDialog(QWidget *parent)
                      "font-weight: bold; } "
                      "QPushButton:disabled { background-color: #5a5a5a; "
                      "color: #cccccc; }"));
-  m_export_btn = new QPushButton(tr("Export Results CSV..."));
-  m_export_btn->setEnabled(false);
   btn_row->addWidget(m_start_btn);
   btn_row->addWidget(m_stop_btn);
-  btn_row->addStretch(1);
-  btn_row->addWidget(m_export_btn);
   layout->addLayout(btn_row);
 
+  m_export_btn = new QPushButton(tr("Export Results CSV..."));
+  m_export_btn->setEnabled(false);
+  layout->addWidget(m_export_btn);
+
   m_status_label = new QLabel(tr("Idle."));
+  m_status_label->setWordWrap(true);
   layout->addWidget(m_status_label);
 
-  // --- Live charts -----------------------------------------------------
+  // --- Results table ---------------------------------------------------
+  m_results_table = new QTableWidget(0, 8);
+  m_results_table->setHorizontalHeaderLabels(
+      {tr("Step"), tr("Commanded (A)"), tr("Avg Current (A)"),
+       tr("Avg Torque (Nm)"), tr("Peak Current (A)"), tr("Peak Torque (Nm)"),
+       tr("Ext. Torque (Nm)"), tr("Ext. Speed (RPM)")});
+  m_results_table->horizontalHeader()->setStretchLastSection(true);
+  m_results_table->horizontalHeader()->setSectionResizeMode(QHeaderView::Interactive);
+  m_results_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+  m_results_table->setSelectionMode(QAbstractItemView::NoSelection);
+  m_results_table->setMinimumHeight(160);
+  m_results_table->setMinimumWidth(0);
+  m_results_table->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Expanding);
+  for (int col = 0; col < m_results_table->columnCount(); ++col) {
+    m_results_table->setColumnWidth(col, 90);
+  }
+  layout->addWidget(m_results_table, 1);
+
+  // --- Right: big live plots with a live-value readout above each ---------
+  auto *right_scroll = new QScrollArea();
+  right_scroll->setWidgetResizable(true);
+  right_scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+  right_scroll->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+  auto *right_panel = new QWidget();
+  auto *right_layout = new QVBoxLayout(right_panel);
+  right_scroll->setWidget(right_panel);
+  splitter->addWidget(right_scroll);
+  splitter->setStretchFactor(0, 0);
+  splitter->setStretchFactor(1, 1);
+
+  m_current_value_label = new QLabel(tr("Commanded: -- A   Actual: -- A"));
+  m_current_value_label->setStyleSheet(
+      QStringLiteral("font-size: 15px; font-weight: bold;"));
+  right_layout->addWidget(m_current_value_label);
+
   m_current_chart = new StripChart(tr("Current (A)"));
   m_current_chart->setAxisTitles(tr("s"), tr("A"));
+  m_current_chart->setMinimumHeight(260);
+  m_current_chart->setPannable(true);
+  m_current_chart->setMaxPoints(200000);
   m_series_cmd = m_current_chart->addSeries(tr("commanded"), QColor(90, 170, 250));
   m_series_current =
       m_current_chart->addSeries(tr("actual"), QColor(250, 190, 60));
-  layout->addWidget(m_current_chart, 1);
+  right_layout->addWidget(m_current_chart, 1);
+
+  m_torque_value_label =
+      new QLabel(tr("Drive torque: -- Nm   External sensor: -- Nm"));
+  m_torque_value_label->setStyleSheet(
+      QStringLiteral("font-size: 15px; font-weight: bold;"));
+  right_layout->addWidget(m_torque_value_label);
 
   m_torque_chart = new StripChart(tr("Torque (Nm)"));
   m_torque_chart->setAxisTitles(tr("s"), tr("Nm"));
+  m_torque_chart->setMinimumHeight(260);
+  m_torque_chart->setPannable(true);
+  m_torque_chart->setMaxPoints(200000);
   m_series_torque =
-      m_torque_chart->addSeries(tr("actual"), QColor(120, 220, 140));
-  layout->addWidget(m_torque_chart, 1);
+      m_torque_chart->addSeries(tr("actual (drive)"), QColor(120, 220, 140));
+  m_series_ext_torque = m_torque_chart->addSeries(
+      tr("actual (external sensor)"), QColor(220, 120, 220));
+  right_layout->addWidget(m_torque_chart, 1);
 
-  // --- Results table ---------------------------------------------------
-  m_results_table = new QTableWidget(0, 6);
-  m_results_table->setHorizontalHeaderLabels(
-      {tr("Step"), tr("Commanded (A)"), tr("Avg Current (A)"),
-       tr("Avg Torque (Nm)"), tr("Peak Current (A)"), tr("Peak Torque (Nm)")});
-  m_results_table->horizontalHeader()->setStretchLastSection(true);
-  m_results_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
-  m_results_table->setSelectionMode(QAbstractItemView::NoSelection);
-  m_results_table->setMaximumHeight(180);
-  layout->addWidget(m_results_table);
+  m_iv_chart = new StripChart(tr("Current vs Torque (per-step average)"));
+  m_iv_chart->setAxisTitles(tr("A"), tr("Nm"));
+  m_iv_chart->setXAxis(StripChart::XAxis::Value);
+  m_iv_chart->setMinimumHeight(260);
+  m_series_iv_drive_up =
+      m_iv_chart->addSeries(tr("drive (up)"), QColor(120, 220, 140));
+  m_series_iv_drive_down =
+      m_iv_chart->addSeries(tr("drive (down)"), QColor(60, 130, 80));
+  m_series_iv_ext_up =
+      m_iv_chart->addSeries(tr("external (up)"), QColor(220, 120, 220));
+  m_series_iv_ext_down =
+      m_iv_chart->addSeries(tr("external (down)"), QColor(140, 60, 140));
+  right_layout->addWidget(m_iv_chart, 1);
+
+  // Both charts share the same time axis, so one scrollbar/window-size
+  // control scrubs and rescales both together.
+  auto *scrub_row = new QHBoxLayout();
+  scrub_row->addWidget(new QLabel(tr("Time window:")));
+  m_window_spin = new QDoubleSpinBox();
+  m_window_spin->setRange(1.0, 300.0);
+  m_window_spin->setDecimals(0);
+  m_window_spin->setSuffix(tr(" s"));
+  m_window_spin->setValue(10.0);
+  scrub_row->addWidget(m_window_spin);
+  scrub_row->addWidget(new QLabel(tr("Scroll through plot:")));
+  m_time_scrollbar = new QScrollBar(Qt::Horizontal);
+  m_time_scrollbar->setRange(0, 0);
+  m_time_scrollbar->setPageStep(100); // 10 s window at 0.1 s resolution.
+  m_time_scrollbar->setEnabled(false);
+  scrub_row->addWidget(m_time_scrollbar, 1);
+  m_live_btn = new QPushButton(tr("Live"));
+  m_live_btn->setCheckable(true);
+  m_live_btn->setChecked(true);
+  m_live_btn->setEnabled(false);
+  scrub_row->addWidget(m_live_btn);
+  right_layout->addLayout(scrub_row);
+
+  connect(m_window_spin, &QDoubleSpinBox::valueChanged, this,
+          [this](double seconds) {
+            m_current_chart->setWindowSeconds(seconds);
+            m_torque_chart->setWindowSeconds(seconds);
+            m_time_scrollbar->setPageStep(
+                std::max(1, static_cast<int>(std::round(seconds * 10.0))));
+          });
+  connect(m_time_scrollbar, &QScrollBar::valueChanged, this, [this](int value) {
+    if (m_scrub_updating) {
+      return;
+    }
+    m_live_btn->setChecked(false);
+    const double end_x = value / 10.0;
+    m_current_chart->setViewEnd(end_x);
+    m_torque_chart->setViewEnd(end_x);
+  });
+  connect(m_live_btn, &QPushButton::toggled, this, [this](bool live) {
+    if (live) {
+      m_current_chart->followLatest();
+      m_torque_chart->followLatest();
+      m_scrub_updating = true;
+      m_time_scrollbar->setValue(m_time_scrollbar->maximum());
+      m_scrub_updating = false;
+    }
+  });
 
   connect(m_start_btn, &QPushButton::clicked, this,
           &LockedRotorTestDialog::onStartClicked);
@@ -146,6 +311,8 @@ LockedRotorTestDialog::LockedRotorTestDialog(QWidget *parent)
           [this](bool) { updateStartEnabled(); });
   connect(m_joint_combo, &QComboBox::currentIndexChanged, this,
           [this](int) { updateStartEnabled(); });
+  connect(m_ext_daq_check, &QCheckBox::toggled, this,
+          [this](bool) { updateExternalDaqAvailability(); });
 
   updateStartEnabled();
 }
@@ -168,10 +335,35 @@ std::size_t LockedRotorTestDialog::selectedJoint() const {
   return static_cast<std::size_t>(std::max(0, m_joint_combo->currentIndex()));
 }
 
+double LockedRotorTestDialog::appliedCurrentA(double requested_a) const {
+  return m_invert_current_check->isChecked() ? -requested_a : requested_a;
+}
+
 void LockedRotorTestDialog::updateStartEnabled() {
   const bool ok = m_confirm_check->isChecked() && !m_joints.empty() &&
                   m_joint_combo->currentIndex() >= 0;
   m_start_btn->setEnabled(ok && !m_running);
+}
+
+void LockedRotorTestDialog::updateExternalDaqAvailability() {
+  const bool supported = actuator_test::external_daq_supported();
+  m_ext_daq_check->setEnabled(supported && !m_running);
+  if (!supported) {
+    m_ext_daq_check->setChecked(false);
+    m_ext_daq_status_label->setText(
+        tr("NI-DAQmx driver not available in this build; external "
+           "verification disabled."));
+  } else {
+    m_ext_daq_status_label->setText(
+        tr("NI-DAQmx available. Channels default to the session1 reference "
+           "setup."));
+  }
+  const bool fields_enabled =
+      supported && m_ext_daq_check->isChecked() && !m_running;
+  m_ext_analog_edit->setEnabled(fields_enabled);
+  m_ext_digital_a_edit->setEnabled(fields_enabled);
+  m_ext_digital_b_edit->setEnabled(fields_enabled);
+  m_ext_invert_sign_check->setEnabled(supported && !m_running);
 }
 
 void LockedRotorTestDialog::buildSteps() {
@@ -181,6 +373,7 @@ void LockedRotorTestDialog::buildSteps() {
   const double step = std::max(0.05, std::fabs(m_step_spin->value()));
   if (std::fabs(end - start) < 1e-9) {
     m_steps_a.push_back(start);
+    m_forward_step_count = m_steps_a.size();
     return;
   }
   const double dir = (end > start) ? step : -step;
@@ -193,6 +386,7 @@ void LockedRotorTestDialog::buildSteps() {
   if (m_steps_a.empty() || std::fabs(m_steps_a.back() - end) > 1e-6) {
     m_steps_a.push_back(end);
   }
+  m_forward_step_count = m_steps_a.size();
 
   // Optionally mirror the ramp back down to the start value (e.g. 0) so the
   // sweep doesn't leave the joint sitting at the peak current. Build the
@@ -218,6 +412,13 @@ void LockedRotorTestDialog::onStartClicked() {
   m_results_table->setRowCount(0);
   m_current_chart->clearAll();
   m_torque_chart->clearAll();
+  m_iv_chart->clearAll();
+  m_current_chart->followLatest();
+  m_torque_chart->followLatest();
+  m_scrub_updating = true;
+  m_time_scrollbar->setRange(0, 0);
+  m_scrub_updating = false;
+  m_live_btn->setChecked(true);
   m_export_btn->setEnabled(false);
 
   m_active_joint = selectedJoint();
@@ -230,9 +431,40 @@ void LockedRotorTestDialog::onStartClicked() {
   m_step_spin->setEnabled(false);
   m_dwell_spin->setEnabled(false);
   m_return_sweep_check->setEnabled(false);
+  m_invert_current_check->setEnabled(false);
   m_confirm_check->setEnabled(false);
   m_start_btn->setEnabled(false);
   m_stop_btn->setEnabled(true);
+  m_ext_daq_check->setEnabled(false);
+  m_ext_analog_edit->setEnabled(false);
+  m_ext_digital_a_edit->setEnabled(false);
+  m_ext_digital_b_edit->setEnabled(false);
+
+  if (m_ext_daq_check->isChecked()) {
+    actuator_test::ExternalDaqConfig ext_cfg;
+    ext_cfg.analog_channel = m_ext_analog_edit->text().toStdString();
+    ext_cfg.digital_line_a = m_ext_digital_a_edit->text().toStdString();
+    ext_cfg.digital_line_b = m_ext_digital_b_edit->text().toStdString();
+    ext_cfg.invert_torque_sign = m_ext_invert_sign_check->isChecked();
+    m_external_daq =
+        std::make_unique<actuator_test::ExternalDaqReader>(ext_cfg);
+    std::string error;
+    if (!m_external_daq->start(error)) {
+      QMessageBox::warning(
+          this, tr("External DAQ"),
+          tr("Could not start external DAQ verification: %1\n\nContinuing "
+             "the sweep without it.")
+              .arg(QString::fromStdString(error)));
+      m_external_daq.reset();
+      m_ext_daq_status_label->setText(
+          tr("External DAQ failed to start: %1").arg(QString::fromStdString(error)));
+    } else {
+      m_ext_daq_status_label->setText(
+          tr("External DAQ verification active (%1, %2/%3).")
+              .arg(m_ext_analog_edit->text(), m_ext_digital_a_edit->text(),
+                   m_ext_digital_b_edit->text()));
+    }
+  }
 
   beginStep(0);
 }
@@ -245,8 +477,11 @@ void LockedRotorTestDialog::beginStep(std::size_t index) {
   m_peak_current = 0.0;
   m_peak_torque = 0.0;
   m_sample_count = 0;
+  m_sum_ext_torque = 0.0;
+  m_sum_ext_speed = 0.0;
+  m_ext_sample_count = 0;
 
-  const double target = m_steps_a[index];
+  const double target = appliedCurrentA(m_steps_a[index]);
   emit currentSetpointRequested(m_active_joint, target, /*release=*/false);
   m_status_label->setText(
       tr("Step %1/%2: commanding %3 A, dwelling %4 s...")
@@ -270,17 +505,62 @@ void LockedRotorTestDialog::appendTelemetry(const TelemetryFrame &frame) {
   }
 
   const JointTelemetry &jt = frame.joints[m_active_joint];
-  const double commanded = m_steps_a[m_step_index];
+  const double commanded = appliedCurrentA(m_steps_a[m_step_index]);
 
   m_current_chart->append(m_series_cmd, frame.t_s, commanded);
   m_current_chart->append(m_series_current, frame.t_s, jt.current_a);
   m_torque_chart->append(m_series_torque, frame.t_s, jt.torque_nm);
+
+  const int max_scrub = static_cast<int>(std::round(frame.t_s * 10.0));
+  m_scrub_updating = true;
+  m_time_scrollbar->setRange(0, std::max(0, max_scrub));
+  m_scrub_updating = false;
+  m_time_scrollbar->setEnabled(max_scrub > 0);
+  m_live_btn->setEnabled(max_scrub > 0);
+  if (m_live_btn->isChecked()) {
+    m_scrub_updating = true;
+    m_time_scrollbar->setValue(max_scrub);
+    m_scrub_updating = false;
+  }
+
+  m_current_value_label->setText(
+      tr("Commanded: %1 A   Actual: %2 A")
+          .arg(commanded, 0, 'f', 3)
+          .arg(jt.current_a, 0, 'f', 3));
+  m_torque_value_label->setText(
+      tr("Drive torque: %1 Nm   External sensor: %2 Nm")
+          .arg(jt.torque_nm, 0, 'f', 4)
+          .arg(m_external_daq
+                   ? QString::number(m_external_daq->latest().filtered_torque_nm, 'f', 4)
+                   : QStringLiteral("--")));
 
   m_sum_current += jt.current_a;
   m_sum_torque += jt.torque_nm;
   m_peak_current = std::max(m_peak_current, std::fabs(jt.current_a));
   m_peak_torque = std::max(m_peak_torque, std::fabs(jt.torque_nm));
   ++m_sample_count;
+
+  if (m_external_daq && m_external_daq->running()) {
+    const auto ext = m_external_daq->latest();
+    m_torque_chart->append(m_series_ext_torque, frame.t_s,
+                           ext.filtered_torque_nm);
+    m_sum_ext_torque += ext.filtered_torque_nm;
+    m_sum_ext_speed += ext.speed_rpm;
+    ++m_ext_sample_count;
+  } else if (m_external_daq && !m_external_daq->running()) {
+    // The acquisition thread died on its own (e.g. a DAQmx read error) --
+    // surface why instead of silently leaving the external curve flat/absent.
+    const QString reason = QString::fromStdString(m_external_daq->lastError());
+    m_external_daq.reset();
+    m_ext_daq_status_label->setText(
+        tr("External DAQ stopped: %1")
+            .arg(reason.isEmpty() ? tr("(no error reported)") : reason));
+    QMessageBox::warning(
+        this, tr("External DAQ"),
+        tr("External DAQ verification stopped unexpectedly: %1\n\nThe sweep "
+           "continues without it.")
+            .arg(reason.isEmpty() ? tr("(no error reported)") : reason));
+  }
 
   if (jt.fault) {
     stopTest(tr("joint '%1' faulted").arg(QString::fromStdString(jt.name)));
@@ -295,12 +575,16 @@ void LockedRotorTestDialog::appendTelemetry(const TelemetryFrame &frame) {
 
 void LockedRotorTestDialog::finishStep() {
   StepResult r;
-  r.commanded_a = m_steps_a[m_step_index];
+  r.commanded_a = appliedCurrentA(m_steps_a[m_step_index]);
   r.avg_current_a =
       m_sample_count > 0 ? m_sum_current / m_sample_count : 0.0;
   r.avg_torque_nm = m_sample_count > 0 ? m_sum_torque / m_sample_count : 0.0;
   r.peak_current_a = m_peak_current;
   r.peak_torque_nm = m_peak_torque;
+  r.ext_avg_torque_nm =
+      m_ext_sample_count > 0 ? m_sum_ext_torque / m_ext_sample_count : 0.0;
+  r.ext_avg_speed_rpm =
+      m_ext_sample_count > 0 ? m_sum_ext_speed / m_ext_sample_count : 0.0;
   appendResultRow(static_cast<int>(m_step_index) + 1, r);
 
   const std::size_t next = m_step_index + 1;
@@ -319,6 +603,10 @@ void LockedRotorTestDialog::stopTest(const QString &reason) {
   }
   m_running = false;
   emit currentSetpointRequested(m_active_joint, 0.0, /*release=*/true);
+  if (m_external_daq) {
+    m_external_daq->stop();
+    m_external_daq.reset();
+  }
 
   m_joint_combo->setEnabled(true);
   m_start_spin->setEnabled(true);
@@ -326,10 +614,12 @@ void LockedRotorTestDialog::stopTest(const QString &reason) {
   m_step_spin->setEnabled(true);
   m_dwell_spin->setEnabled(true);
   m_return_sweep_check->setEnabled(true);
+  m_invert_current_check->setEnabled(true);
   m_confirm_check->setEnabled(true);
   m_stop_btn->setEnabled(false);
   m_export_btn->setEnabled(m_results_table->rowCount() > 0);
   updateStartEnabled();
+  updateExternalDaqAvailability();
 
   m_status_label->setText(tr("Idle (%1).").arg(reason));
 }
@@ -347,7 +637,22 @@ void LockedRotorTestDialog::appendResultRow(int step_number,
   setCell(3, QString::number(r.avg_torque_nm, 'f', 4));
   setCell(4, QString::number(r.peak_current_a, 'f', 3));
   setCell(5, QString::number(r.peak_torque_nm, 'f', 4));
+  setCell(6, m_external_daq ? QString::number(r.ext_avg_torque_nm, 'f', 4)
+                           : QStringLiteral("--"));
+  setCell(7, m_external_daq ? QString::number(r.ext_avg_speed_rpm, 'f', 1)
+                           : QStringLiteral("--"));
   m_results_table->scrollToBottom();
+
+  // Route to the up-sweep or down-sweep (mirrored return leg) series so the
+  // two directions can be told apart for hysteresis study.
+  const bool ascending = m_step_index < m_forward_step_count;
+  m_iv_chart->append(ascending ? m_series_iv_drive_up : m_series_iv_drive_down,
+                     r.avg_current_a, r.avg_torque_nm);
+  if (m_external_daq) {
+    m_iv_chart->append(
+        ascending ? m_series_iv_ext_up : m_series_iv_ext_down,
+        r.avg_current_a, r.ext_avg_torque_nm);
+  }
 }
 
 void LockedRotorTestDialog::exportResultsCsv() {
@@ -372,7 +677,7 @@ void LockedRotorTestDialog::exportResultsCsv() {
   }
   QTextStream out(&file);
   out << "step,commanded_a,avg_current_a,avg_torque_nm,peak_current_a,peak_"
-         "torque_nm\n";
+         "torque_nm,ext_avg_torque_nm,ext_avg_speed_rpm\n";
   for (int row = 0; row < m_results_table->rowCount(); ++row) {
     for (int col = 0; col < m_results_table->columnCount(); ++col) {
       if (col > 0) {
