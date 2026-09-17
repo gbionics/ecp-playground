@@ -41,11 +41,18 @@ struct GoToCommand {
 };
 
 /// Apply a constant current setpoint to a single joint, bypassing position and
-/// velocity feedback (KP=KD=0), for constant-torque bench testing.  Send
-/// target_current_a = 0 to stop and return to a held position.
+/// velocity feedback (KP=KD=0), for constant-torque bench testing.
+///
+/// `target_current_a` is commanded verbatim, including a genuine 0 A (held,
+/// still in current-control mode) -- it is NOT a stop signal. Set `release`
+/// to leave current-control mode and return to a held position on this joint
+/// only; `target_current_a` is ignored when `release` is set. This is
+/// intentionally distinct from StopCommand, which is a global emergency stop
+/// across every joint.
 struct CurrentCommand {
   std::size_t joint = 0;
   double target_current_a = 0.0;
+  bool release = false;
 };
 
 /// Begin or end a backdrive limit-capture session for a set of joints.  While

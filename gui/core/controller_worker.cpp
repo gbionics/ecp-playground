@@ -570,8 +570,9 @@ void ControllerWorker::handleCommand(const CurrentCommand &c) {
     return; // Ignore while a trajectory is running.
   }
 
-  if (std::fabs(c.target_current_a) < 1e-9) {
-    // Stop the current test but hold position (stay engaged).
+  if (c.release) {
+    // Release the current test but hold position (stay engaged). Distinct
+    // from commanding a genuine 0 A setpoint, which stays in Activity::Current.
     ct.target_current_a = 0.0;
     if (ct.activity == Activity::Current) {
       ct.activity = Activity::GoTo;

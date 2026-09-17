@@ -21,6 +21,7 @@ add_executable(
     widgets/enhanced_limits_panel.cpp
     widgets/event_log_panel.cpp
     widgets/axis_overview_panel.cpp
+    widgets/locked_rotor_test_panel.cpp
     wizard/setup_wizard.cpp
     # Headers with Q_OBJECT listed so AUTOMOC always processes them.
     main_window.hpp
@@ -35,6 +36,7 @@ add_executable(
     widgets/enhanced_limits_panel.hpp
     widgets/event_log_panel.hpp
     widgets/axis_overview_panel.hpp
+    widgets/locked_rotor_test_panel.hpp
     wizard/setup_wizard.hpp
 )
 

@@ -9,6 +9,7 @@
 #include "widgets/enhanced_limits_panel.hpp"
 #include "widgets/event_log_panel.hpp"
 #include "widgets/jog_panel.hpp"
+#include "widgets/locked_rotor_test_panel.hpp"
 #include "widgets/plot_panel.hpp"
 #include "widgets/trajectory_panel.hpp"
 
@@ -89,6 +90,8 @@ MainWindow::MainWindow(RuntimeProfile profile, QString default_config,
 
   m_worker = std::make_unique<ControllerWorker>(m_profile);
   m_worker->start();
+
+  m_locked_rotor_test = new LockedRotorTestDialog(this);
 
   m_plot = new PlotPanel();
   m_plot->setUpdateRate(
@@ -217,6 +220,15 @@ void MainWindow::buildMenu() {
                       : QDir(QDir::currentPath()).absoluteFilePath(root);
     QDir().mkpath(abs);
     QDesktopServices::openUrl(QUrl::fromLocalFile(abs));
+  });
+
+  auto *tools_menu = menuBar()->addMenu(tr("&Tools"));
+  auto *locked_rotor_action =
+      tools_menu->addAction(tr("Locked-Rotor Test..."));
+  connect(locked_rotor_action, &QAction::triggered, this, [this] {
+    m_locked_rotor_test->show();
+    m_locked_rotor_test->raise();
+    m_locked_rotor_test->activateWindow();
   });
 
   m_view_menu = menuBar()->addMenu(tr("&View"));
@@ -360,6 +372,12 @@ void MainWindow::wireSignals() {
             m_worker->post(CurrentCommand{j, a});
           });
 
+  connect(m_locked_rotor_test,
+          &LockedRotorTestDialog::currentSetpointRequested, this,
+          [this](std::size_t j, double a, bool release) {
+            m_worker->post(CurrentCommand{j, a, release});
+          });
+
   // Enhanced limits panel signals
   connect(m_enhanced_limits, &EnhancedLimitsPanel::captureToggled, this,
           [this](bool start) {
@@ -474,6 +492,7 @@ void MainWindow::poll() {
   m_jog->updateLiveLimits(joints);
   m_enhanced_limits->updateLiveLimits(joints, frame.joints);
   m_plot->appendFrame(frame);
+  m_locked_rotor_test->appendTelemetry(frame);
   m_scheduler->poll(static_cast<uint32_t>(m_timer->interval()));
 
   // Keep the record toggle in sync with the worker's actual state (it may stop
@@ -526,6 +545,7 @@ void MainWindow::refreshJoints(const std::vector<JointInfo> &joints) {
   m_enhanced_limits->setJoints(joints);
   m_axis_overview->setJoints(joints);
   m_drives_diagnostics->setJoints(joints);
+  m_locked_rotor_test->setJoints(joints);
   m_plot->setJoints(m_joint_names);
 
   m_table->setRowCount(static_cast<int>(joints.size()));

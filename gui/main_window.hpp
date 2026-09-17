@@ -41,6 +41,7 @@ class DrivesDiagnosticsPanel;
 class EnhancedLimitsPanel;
 class EventLogPanel;
 class AxisOverviewPanel;
+class LockedRotorTestDialog;
 
 class MainWindow : public QMainWindow {
   Q_OBJECT
@@ -109,6 +110,7 @@ private:
   DrivesDiagnosticsPanel *m_drives_diagnostics = nullptr;
   EnhancedLimitsPanel *m_enhanced_limits = nullptr;
   EventLogPanel *m_event_log = nullptr;
+  LockedRotorTestDialog *m_locked_rotor_test = nullptr;
 
   // --- Display tables and logs ---
   QTableWidget *m_table = nullptr;
