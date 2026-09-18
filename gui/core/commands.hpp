@@ -40,6 +40,21 @@ struct GoToCommand {
   double speed_deg_s = 0.0; ///< <=0 uses the profile default approach speed.
 };
 
+/// Apply a constant current setpoint to a single joint, bypassing position and
+/// velocity feedback (KP=KD=0), for constant-torque bench testing.
+///
+/// `target_current_a` is commanded verbatim, including a genuine 0 A (held,
+/// still in current-control mode) -- it is NOT a stop signal. Set `release`
+/// to leave current-control mode and idle this joint; `target_current_a` is
+/// ignored when `release` is set. This is
+/// intentionally distinct from StopCommand, which is a global emergency stop
+/// across every joint.
+struct CurrentCommand {
+  std::size_t joint = 0;
+  double target_current_a = 0.0;
+  bool release = false;
+};
+
 /// Begin or end a backdrive limit-capture session for a set of joints.  While
 /// active the controller idles the drives and tracks the min/max travelled.
 struct CaptureLimitsCommand {
@@ -69,6 +84,9 @@ struct StartTrajectoryCommand {
 /// Stop any running trajectory and return to hold/idle.
 struct StopCommand {};
 
+/// Request a DS402 fault reset on every connected drive, then leave it idle.
+struct ResetFaultCommand {};
+
 /// Start or stop free-running CSV recording of all joints, independent of any
 /// trajectory. Works in every state so manual moves, holds and backdriving can
 /// be captured for later analysis.
@@ -85,8 +103,8 @@ struct ShutdownCommand {};
 
 using Command =
     std::variant<ConnectCommand, DisconnectCommand, JogCommand, GoToCommand,
-                 CaptureLimitsCommand, SetLimitsCommand, ResetLimitsCommand,
-                 StartTrajectoryCommand, StopCommand, PauseCommand,
-                 RecordCommand, ShutdownCommand>;
+                 CurrentCommand, CaptureLimitsCommand, SetLimitsCommand,
+                 ResetLimitsCommand, StartTrajectoryCommand, StopCommand,
+                 ResetFaultCommand, PauseCommand, RecordCommand, ShutdownCommand>;
 
 } // namespace actuator_test::gui

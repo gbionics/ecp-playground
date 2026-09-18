@@ -120,6 +120,7 @@ enum class Activity {
   GoTo,       ///< Min-jerk move to an absolute target, then hold.
   Capture,    ///< Idled while tracking the travelled min/max.
   Trajectory, ///< Playing a generated trajectory.
+  Current,    ///< Constant current setpoint, no position/velocity feedback.
 };
 
 /// Decimate a raw recorded position trail into spline waypoints, mirroring the
@@ -196,6 +197,9 @@ struct ControllerWorker::Impl {
     double goto_target = 0.0;
     double goto_T = 0.0;
     double goto_t = 0.0;
+
+    // Current test
+    double target_current_a = 0.0;
 
     // Trajectory
     int phase = 0; ///< ControlPhase
@@ -358,10 +362,12 @@ void ControllerWorker::idleJoint(std::size_t i) {
   auto &d = *jh.driver;
   d.set_target_position(d.actual_position());
   d.set_target_velocity(0);
+  d.set_target_torque(0);
   d.idle();
   c.engaged = false;
   c.activity = Activity::Idle;
   c.jog_vel_deg_s = 0.0;
+  c.target_current_a = 0.0;
   if (c.logger && c.logger->is_open()) {
     c.logger->close();
   }
@@ -549,6 +555,42 @@ void ControllerWorker::handleCommand(const JogCommand &c) {
   }
   ct.activity = Activity::Jog;
   ct.jog_vel_deg_s = c.velocity_deg_s;
+  recomputeState();
+}
+
+void ControllerWorker::handleCommand(const CurrentCommand &c) {
+  auto &impl = *m_impl;
+  if (c.joint >= impl.joints.size()) {
+    return;
+  }
+  auto &jh = impl.joints[c.joint];
+  auto &ct = impl.ctl[c.joint];
+
+  if (ct.activity == Activity::Trajectory) {
+    return; // Ignore while a trajectory is running.
+  }
+
+  if (c.release) {
+    // Release the current test to a backdrivable idle state. Distinct from
+    // commanding a genuine 0 A setpoint, which stays in Activity::Current.
+    idleJoint(c.joint);
+    recomputeState();
+    return;
+  }
+
+  // Powered motion is only allowed once a valid limit envelope has been
+  // captured, same rule as jogging.
+  if (!ct.limits_set) {
+    log("current test blocked on '" + jh.name +
+        "': backdrive the joint through its range to set limits first");
+    return;
+  }
+
+  if (!ct.engaged) {
+    engageJoint(c.joint);
+  }
+  ct.activity = Activity::Current;
+  ct.target_current_a = c.target_current_a;
   recomputeState();
 }
 
@@ -799,6 +841,27 @@ void ControllerWorker::handleCommand(const StopCommand &) {
   }
 }
 
+void ControllerWorker::handleCommand(const ResetFaultCommand &) {
+  auto &impl = *m_impl;
+  if (!impl.bus_up) {
+    return;
+  }
+  bool reset_requested = false;
+  for (std::size_t i = 0; i < impl.joints.size(); ++i) {
+    auto &jh = impl.joints[i];
+    if (jh.driver) {
+      reset_requested = jh.driver->request_fault_reset() || reset_requested;
+    }
+    idleJoint(i);
+  }
+  if (reset_requested) {
+    setState(ControllerState::Connected, "fault reset requested");
+    log("DS402 fault reset requested; all drives idled");
+  } else {
+    error("fault reset is not supported by the connected drive");
+  }
+}
+
 void ControllerWorker::handleCommand(const PauseCommand &) {
   auto &impl = *m_impl;
   bool any = false;
@@ -966,6 +1029,27 @@ void ControllerWorker::controlTick() {
       d.apply_runtime_gains(jh.pvt_kp, jh.pvt_kd);
       d.set_target_position(static_cast<int32_t>(ct.cmd_counts));
       d.set_target_velocity(0);
+      break;
+    }
+
+    case Activity::Current: {
+      std::string reason;
+      if (safety_violated(d, m_profile, jh.name, ct.safety, reason)) {
+        error("safety abort on '" + jh.name + "': " + reason);
+        idleJoint(i);
+        setState(ControllerState::Faulted, reason);
+        break;
+      }
+      ct.cmd_counts = static_cast<double>(d.actual_position());
+      // KP=KD=0: no position/velocity feedback, current setpoint only.
+      d.apply_runtime_gains(0, 0);
+      d.set_target_position(static_cast<int32_t>(ct.cmd_counts));
+      d.set_target_velocity(0);
+      const double rated_a = d.rated_current_a();
+      const double permille =
+          rated_a > 0.0 ? (ct.target_current_a / rated_a * 1000.0) : 0.0;
+      d.set_target_torque(static_cast<int16_t>(
+          std::clamp(permille, -32000.0, 32000.0)));
       break;
     }
 

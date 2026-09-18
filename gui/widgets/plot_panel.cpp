@@ -55,6 +55,11 @@ void StripChart::clearAll() {
     s.points.clear();
   }
   m_latest_x = 0.0;
+  m_data_min_x = 0.0;
+  m_data_max_x = 0.0;
+  m_have_data = false;
+  m_follow_latest = true;
+  m_view_end_x = 0.0;
   update();
 }
 
@@ -67,9 +72,25 @@ void StripChart::append(int series, double x, double y) {
 
   if (m_x_axis == XAxis::Time) {
     m_latest_x = std::max(m_latest_x, x);
-    const double x_min = m_latest_x - m_window_s;
-    while (pts.size() > 1 && pts.front().x() < x_min) {
-      pts.pop_front();
+    if (!m_have_data) {
+      m_data_min_x = x;
+      m_data_max_x = x;
+      m_have_data = true;
+    } else {
+      m_data_min_x = std::min(m_data_min_x, x);
+      m_data_max_x = std::max(m_data_max_x, x);
+    }
+    if (m_pannable) {
+      // Retain full history (bounded by point count) so it can be scrolled
+      // back through, instead of discarding anything older than the window.
+      while (pts.size() > m_max_points) {
+        pts.pop_front();
+      }
+    } else {
+      const double x_min = m_latest_x - m_window_s;
+      while (pts.size() > 1 && pts.front().x() < x_min) {
+        pts.pop_front();
+      }
     }
   } else {
     // Value (XY) axis: cap by sample count so the trace does not grow
@@ -78,6 +99,17 @@ void StripChart::append(int series, double x, double y) {
       pts.pop_front();
     }
   }
+  update();
+}
+
+void StripChart::setViewEnd(double end_x) {
+  m_follow_latest = false;
+  m_view_end_x = end_x;
+  update();
+}
+
+void StripChart::followLatest() {
+  m_follow_latest = true;
   update();
 }
 
@@ -118,15 +150,19 @@ void StripChart::paintEvent(QPaintEvent *) {
     x_min -= xp;
     x_max += xp;
   } else {
-    x_max = std::max(m_latest_x, m_window_s);
+    x_max = m_follow_latest ? std::max(m_latest_x, m_window_s) : m_view_end_x;
     x_min = x_max - m_window_s;
   }
 
-  // Y range across all visible points.
+  // Y range across points visible in the current x window (so panning back
+  // rescales instead of being dominated by the full history's range).
   double y_lo = 0.0, y_hi = 0.0;
   bool have = false;
   for (const auto &s : m_series) {
     for (const auto &pt : s.points) {
+      if (m_x_axis == XAxis::Time && (pt.x() < x_min || pt.x() > x_max)) {
+        continue;
+      }
       if (!have) {
         y_lo = y_hi = pt.y();
         have = true;
@@ -204,11 +240,16 @@ void StripChart::paintEvent(QPaintEvent *) {
 
   // Series.
   int legend_x = static_cast<int>(plot.left()) + 6;
+  p.save();
+  p.setClipRect(plot);
   for (const auto &s : m_series) {
     if (s.points.size() >= 2) {
       QPolygonF poly;
       poly.reserve(static_cast<int>(s.points.size()));
       for (const auto &pt : s.points) {
+        if (m_x_axis == XAxis::Time && (pt.x() < x_min || pt.x() > x_max)) {
+          continue;
+        }
         poly << toPx(pt);
       }
       p.setPen(QPen(s.color, 1.5));
@@ -217,6 +258,9 @@ void StripChart::paintEvent(QPaintEvent *) {
       p.setPen(QPen(s.color, 3.0));
       p.drawPoint(toPx(s.points.front()));
     }
+  }
+  p.restore();
+  for (const auto &s : m_series) {
     // Legend swatch.
     if (!s.name.isEmpty()) {
       p.setPen(s.color);
