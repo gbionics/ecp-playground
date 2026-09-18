@@ -15,7 +15,7 @@ double torque_constant_for_model(std::string_view model) noexcept {
   if (model == "X10-200")
     return 3.3;
   if (model == "X8-120")
-    return 2.0;
+    return 2.4;
   if (model == "X6-60")
     return 1.5;
   if (model == "X4-36")

@@ -85,12 +85,17 @@ private:
   /// actually-commanded value matches what's shown in the chart/table.
   double appliedCurrentA(double requested_a) const;
 
+  /// Picks the filtered or raw torque sample per the low-pass filter
+  /// checkbox.
+  double externalTorqueNm(const actuator_test::ExternalDaqReader::Sample &s) const;
+
   QComboBox *m_joint_combo = nullptr;
   QDoubleSpinBox *m_start_spin = nullptr;
   QDoubleSpinBox *m_end_spin = nullptr;
   QDoubleSpinBox *m_step_spin = nullptr;
   QDoubleSpinBox *m_dwell_spin = nullptr;
   QCheckBox *m_return_sweep_check = nullptr;
+  QCheckBox *m_opposite_sign_check = nullptr;
   QCheckBox *m_invert_current_check = nullptr;
   QCheckBox *m_confirm_check = nullptr;
   QPushButton *m_start_btn = nullptr;
@@ -110,6 +115,7 @@ private:
 
   QCheckBox *m_ext_daq_check = nullptr;
   QCheckBox *m_ext_invert_sign_check = nullptr;
+  QCheckBox *m_ext_lpf_check = nullptr;
   QLineEdit *m_ext_analog_edit = nullptr;
   QLineEdit *m_ext_digital_a_edit = nullptr;
   QLineEdit *m_ext_digital_b_edit = nullptr;
@@ -142,6 +148,7 @@ private:
   int m_series_iv_drive_down = -1;
   int m_series_iv_ext_up = -1;
   int m_series_iv_ext_down = -1;
+  int m_series_ext_raw_torque = -1;
 };
 
 } // namespace actuator_test::gui

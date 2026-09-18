@@ -106,6 +106,10 @@ LockedRotorTestDialog::LockedRotorTestDialog(QWidget *parent)
   m_return_sweep_check->setChecked(true);
   form->addRow(m_return_sweep_check);
 
+  m_opposite_sign_check = new QCheckBox(
+      tr("Also sweep the opposite current sign"));
+  form->addRow(m_opposite_sign_check);
+
   m_invert_current_check = new QCheckBox(tr("Invert current polarity"));
   form->addRow(m_invert_current_check);
   auto *invert_current_hint = new QLabel(
@@ -137,6 +141,16 @@ LockedRotorTestDialog::LockedRotorTestDialog(QWidget *parent)
   invert_sign_hint->setWordWrap(true);
   invert_sign_hint->setStyleSheet(QStringLiteral("color: gray; font-size: 11px;"));
   ext_form->addRow(invert_sign_hint);
+
+  m_ext_lpf_check = new QCheckBox(tr("Apply low-pass filter to torque reading"));
+  m_ext_lpf_check->setChecked(true);
+  ext_form->addRow(m_ext_lpf_check);
+  auto *lpf_hint = new QLabel(
+      tr("Uncheck to display/log the raw (unfiltered) sensor voltage "
+         "converted to torque instead."));
+  lpf_hint->setWordWrap(true);
+  lpf_hint->setStyleSheet(QStringLiteral("color: gray; font-size: 11px;"));
+  ext_form->addRow(lpf_hint);
 
   m_ext_analog_edit = new QLineEdit(QStringLiteral("Dev1/ai28"));
   ext_form->addRow(tr("Torque sensor AI channel:"), m_ext_analog_edit);
@@ -235,7 +249,9 @@ LockedRotorTestDialog::LockedRotorTestDialog(QWidget *parent)
   m_series_torque =
       m_torque_chart->addSeries(tr("actual (drive)"), QColor(120, 220, 140));
   m_series_ext_torque = m_torque_chart->addSeries(
-      tr("actual (external sensor)"), QColor(220, 120, 220));
+      tr("external (selected raw/filtered)"), QColor(220, 120, 220));
+    m_series_ext_raw_torque = m_torque_chart->addSeries(
+      tr("external (raw)"), QColor(245, 165, 70));
   right_layout->addWidget(m_torque_chart, 1);
 
   m_iv_chart = new StripChart(tr("Current vs Torque (per-step average)"));
@@ -339,6 +355,11 @@ double LockedRotorTestDialog::appliedCurrentA(double requested_a) const {
   return m_invert_current_check->isChecked() ? -requested_a : requested_a;
 }
 
+double LockedRotorTestDialog::externalTorqueNm(
+    const actuator_test::ExternalDaqReader::Sample &s) const {
+  return m_ext_lpf_check->isChecked() ? s.filtered_torque_nm : s.torque_nm;
+}
+
 void LockedRotorTestDialog::updateStartEnabled() {
   const bool ok = m_confirm_check->isChecked() && !m_joints.empty() &&
                   m_joint_combo->currentIndex() >= 0;
@@ -364,6 +385,7 @@ void LockedRotorTestDialog::updateExternalDaqAvailability() {
   m_ext_digital_a_edit->setEnabled(fields_enabled);
   m_ext_digital_b_edit->setEnabled(fields_enabled);
   m_ext_invert_sign_check->setEnabled(supported && !m_running);
+  m_ext_lpf_check->setEnabled(supported && !m_running);
 }
 
 void LockedRotorTestDialog::buildSteps() {
@@ -398,6 +420,16 @@ void LockedRotorTestDialog::buildSteps() {
                                        m_steps_a.rend());
     m_steps_a.insert(m_steps_a.end(), mirrored.begin(), mirrored.end());
   }
+
+  if (m_opposite_sign_check->isChecked() && m_steps_a.size() > 1) {
+    const std::vector<double> opposite_source = m_steps_a;
+    std::vector<double> opposite;
+    opposite.reserve(opposite_source.size());
+    for (double value : opposite_source) {
+      opposite.push_back(-value);
+    }
+    m_steps_a.insert(m_steps_a.end(), opposite.begin(), opposite.end());
+  }
 }
 
 void LockedRotorTestDialog::onStartClicked() {
@@ -431,6 +463,7 @@ void LockedRotorTestDialog::onStartClicked() {
   m_step_spin->setEnabled(false);
   m_dwell_spin->setEnabled(false);
   m_return_sweep_check->setEnabled(false);
+  m_opposite_sign_check->setEnabled(false);
   m_invert_current_check->setEnabled(false);
   m_confirm_check->setEnabled(false);
   m_start_btn->setEnabled(false);
@@ -531,7 +564,7 @@ void LockedRotorTestDialog::appendTelemetry(const TelemetryFrame &frame) {
       tr("Drive torque: %1 Nm   External sensor: %2 Nm")
           .arg(jt.torque_nm, 0, 'f', 4)
           .arg(m_external_daq
-                   ? QString::number(m_external_daq->latest().filtered_torque_nm, 'f', 4)
+                   ? QString::number(externalTorqueNm(m_external_daq->latest()), 'f', 4)
                    : QStringLiteral("--")));
 
   m_sum_current += jt.current_a;
@@ -542,9 +575,10 @@ void LockedRotorTestDialog::appendTelemetry(const TelemetryFrame &frame) {
 
   if (m_external_daq && m_external_daq->running()) {
     const auto ext = m_external_daq->latest();
-    m_torque_chart->append(m_series_ext_torque, frame.t_s,
-                           ext.filtered_torque_nm);
-    m_sum_ext_torque += ext.filtered_torque_nm;
+    const double ext_torque = externalTorqueNm(ext);
+    m_torque_chart->append(m_series_ext_torque, frame.t_s, ext_torque);
+    m_torque_chart->append(m_series_ext_raw_torque, frame.t_s, ext.torque_nm);
+    m_sum_ext_torque += ext_torque;
     m_sum_ext_speed += ext.speed_rpm;
     ++m_ext_sample_count;
   } else if (m_external_daq && !m_external_daq->running()) {
@@ -614,6 +648,7 @@ void LockedRotorTestDialog::stopTest(const QString &reason) {
   m_step_spin->setEnabled(true);
   m_dwell_spin->setEnabled(true);
   m_return_sweep_check->setEnabled(true);
+  m_opposite_sign_check->setEnabled(true);
   m_invert_current_check->setEnabled(true);
   m_confirm_check->setEnabled(true);
   m_stop_btn->setEnabled(false);
