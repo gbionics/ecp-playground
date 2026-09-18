@@ -571,16 +571,9 @@ void ControllerWorker::handleCommand(const CurrentCommand &c) {
   }
 
   if (c.release) {
-    // Release the current test but hold position (stay engaged). Distinct
-    // from commanding a genuine 0 A setpoint, which stays in Activity::Current.
-    ct.target_current_a = 0.0;
-    if (ct.activity == Activity::Current) {
-      ct.activity = Activity::GoTo;
-      ct.goto_start = ct.cmd_counts;
-      ct.goto_target = ct.cmd_counts;
-      ct.goto_T = 0.0;
-      ct.goto_t = 0.0;
-    }
+    // Release the current test to a backdrivable idle state. Distinct from
+    // commanding a genuine 0 A setpoint, which stays in Activity::Current.
+    idleJoint(c.joint);
     recomputeState();
     return;
   }
@@ -845,6 +838,27 @@ void ControllerWorker::handleCommand(const StopCommand &) {
     setState(ControllerState::Connected, "emergency stop");
   } else {
     recomputeState();
+  }
+}
+
+void ControllerWorker::handleCommand(const ResetFaultCommand &) {
+  auto &impl = *m_impl;
+  if (!impl.bus_up) {
+    return;
+  }
+  bool reset_requested = false;
+  for (std::size_t i = 0; i < impl.joints.size(); ++i) {
+    auto &jh = impl.joints[i];
+    if (jh.driver) {
+      reset_requested = jh.driver->request_fault_reset() || reset_requested;
+    }
+    idleJoint(i);
+  }
+  if (reset_requested) {
+    setState(ControllerState::Connected, "fault reset requested");
+    log("DS402 fault reset requested; all drives idled");
+  } else {
+    error("fault reset is not supported by the connected drive");
   }
 }
 
