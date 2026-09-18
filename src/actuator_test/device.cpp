@@ -195,6 +195,11 @@ public:
 
   void idle() noexcept override { m_driver->idle(); }
 
+  bool request_fault_reset() noexcept override {
+    m_driver->request_fault_reset();
+    return true;
+  }
+
   uint16_t encoder_bits() const noexcept override { return m_encoder_bits; }
 
 private:

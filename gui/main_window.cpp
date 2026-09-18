@@ -162,6 +162,13 @@ MainWindow::MainWindow(RuntimeProfile profile, QString default_config,
          "every drive."));
   statusBar()->addPermanentWidget(m_estop_btn);
 
+  m_reset_fault_btn = new QPushButton(tr("Reset Fault"));
+  m_reset_fault_btn->setEnabled(false);
+  m_reset_fault_btn->setToolTip(
+      tr("Request a DS402 fault reset on every drive, then leave all drives idle."));
+  m_reset_fault_btn->setAccessibleName(tr("Reset drive faults"));
+  statusBar()->addPermanentWidget(m_reset_fault_btn);
+
   m_store_homing_btn = new QPushButton(tr("Store &Homing"));
   m_store_homing_btn->setMinimumHeight(30);
   m_store_homing_btn->setToolTip(
@@ -408,6 +415,8 @@ void MainWindow::wireSignals() {
 
   connect(m_estop_btn, &QPushButton::clicked, this,
           [this] { m_worker->post(StopCommand{}); });
+    connect(m_reset_fault_btn, &QPushButton::clicked, this,
+      [this] { m_worker->post(ResetFaultCommand{}); });
   connect(m_store_homing_btn, &QPushButton::clicked, this, [this] {
     exportOffsetsXmlToPath(QDir::currentPath() +
                                QStringLiteral("/build/joint-offsets.xml"),
@@ -570,6 +579,7 @@ void MainWindow::applyState(ControllerState state) {
   m_trajectory->setRunning(state == ControllerState::Running);
   m_trajectory->setCapturing(state == ControllerState::Capturing);
   m_estop_btn->setEnabled(connected);
+  m_reset_fault_btn->setEnabled(state == ControllerState::Faulted);
   m_store_homing_btn->setEnabled(connected);
   m_record_btn->setEnabled(connected);
 }

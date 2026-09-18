@@ -44,6 +44,7 @@ public:
   virtual void set_target_torque(int16_t value_permille) noexcept = 0;
   virtual void update_operation_mode(int8_t op_mode) noexcept = 0;
   virtual void idle() noexcept = 0;
+  virtual bool request_fault_reset() noexcept { return false; }
 
   virtual uint16_t encoder_bits() const noexcept { return 0; }
 

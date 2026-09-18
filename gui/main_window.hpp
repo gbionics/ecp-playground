@@ -123,6 +123,7 @@ private:
   QLabel *m_health_indicator = nullptr;
   QLabel *m_record_label = nullptr;
   QPushButton *m_estop_btn = nullptr;
+  QPushButton *m_reset_fault_btn = nullptr;
   QPushButton *m_record_btn = nullptr;
   QPushButton *m_store_homing_btn = nullptr;
 

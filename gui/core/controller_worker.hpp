@@ -116,6 +116,7 @@ private:
   void handleCommand(const ResetLimitsCommand &c);
   void handleCommand(const StartTrajectoryCommand &c);
   void handleCommand(const StopCommand &c);
+  void handleCommand(const ResetFaultCommand &c);
   void handleCommand(const PauseCommand &c);
   void handleCommand(const RecordCommand &c);
   void handleCommand(const ShutdownCommand &c);
