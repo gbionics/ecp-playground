@@ -105,6 +105,14 @@ JogPanel::JogPanel(QWidget *parent) : QWidget(parent) {
   m_current_spin->setAccessibleName(tr("Target current in amperes"));
   current_label->setBuddy(m_current_spin);
   current_row->addWidget(m_current_spin, 1);
+  m_rated_current_label = new QLabel(tr("Rated: -- A"));
+  m_rated_current_label->setToolTip(
+      tr("Motor rated current reported by the drive."));
+  current_row->addWidget(m_rated_current_label);
+    m_torque_info_label = new QLabel(tr("Rated torque: -- Nm | Kt: -- Nm/A"));
+    m_torque_info_label->setToolTip(
+      tr("Rated torque is read from the drive; Kt is the configured model constant."));
+    current_row->addWidget(m_torque_info_label);
   auto *apply_current = new QPushButton(tr("A&pply current"));
   apply_current->setToolTip(
       tr("Command a constant current, bypassing position/velocity feedback "
@@ -195,13 +203,31 @@ std::size_t JogPanel::currentJoint() const {
 }
 
 void JogPanel::syncTargetRange(bool reset_value) {
-  if (!m_target_spin) {
+  if (!m_target_spin || !m_rated_current_label || !m_torque_info_label) {
     return;
   }
   const std::size_t j = currentJoint();
   if (j >= m_joints.size()) {
+    m_rated_current_label->setText(tr("Rated: -- A"));
+    m_torque_info_label->setText(tr("Rated torque: -- Nm | Kt: -- Nm/A"));
     return;
   }
+  const double rated_current_a = m_joints[j].rated_current_a;
+  if (rated_current_a > 0.0) {
+    m_rated_current_label->setText(
+        tr("Rated: %1 A").arg(rated_current_a, 0, 'f', 2));
+  } else {
+    m_rated_current_label->setText(tr("Rated: unavailable"));
+  }
+  const double rated_torque_nm = m_joints[j].rated_torque_nm;
+  const double kt = m_joints[j].torque_constant_nm_per_a;
+  const QString torque_text = rated_torque_nm > 0.0
+                                  ? tr("%1 Nm").arg(rated_torque_nm, 0, 'f', 2)
+                                  : tr("unavailable");
+  const QString kt_text = kt > 0.0 ? tr("%1 Nm/A").arg(kt, 0, 'f', 2)
+                                  : tr("unavailable");
+  m_torque_info_label->setText(
+      tr("Rated torque: %1 | Kt: %2").arg(torque_text, kt_text));
   const double lo = m_joints[j].min_limit_deg;
   const double hi = m_joints[j].max_limit_deg;
   m_target_spin->setRange(std::min(lo, hi), std::max(lo, hi));

@@ -79,6 +79,10 @@ public:
     return static_cast<double>(m_driver->rated_current()) / 1000.0;
   }
 
+  double rated_torque_nm() const noexcept override {
+    return static_cast<double>(m_driver->rated_torque()) / 1000.0;
+  }
+
   uint16_t status() const noexcept override { return m_driver->status(); }
 
   bool fault() const noexcept override { return m_driver->fault(); }
@@ -227,6 +231,8 @@ public:
         cfg.get<int>(device_name, "encoder_bits", d->encoder_bits());
     jh.driver = std::make_shared<MyActuatorAdapter>(
         d, static_cast<uint16_t>(jh.encoder_bits));
+    jh.rated_current_a = jh.driver->rated_current_a();
+    jh.rated_torque_nm = jh.driver->rated_torque_nm();
 
     if (jh.operation_mode_name == "OP_PVT") {
       jh.selectable = true;
@@ -262,6 +268,7 @@ public:
     jh.encoder_bits = cfg.get<int>(device_name, "encoder_bits", 13);
     jh.driver = std::make_shared<NovantaAdapter>(
         d, static_cast<uint16_t>(jh.encoder_bits));
+    jh.rated_current_a = jh.driver->rated_current_a();
     if (jh.unavailable_reason.empty()) {
       jh.selectable = true;
     }

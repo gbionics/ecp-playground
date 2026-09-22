@@ -21,6 +21,7 @@
 #include <QPushButton>
 #include <QScrollArea>
 #include <QScrollBar>
+#include <QSpinBox>
 #include <QSplitter>
 #include <QTableWidget>
 #include <QTableWidgetItem>
@@ -100,6 +101,14 @@ LockedRotorTestDialog::LockedRotorTestDialog(QWidget *parent)
   m_dwell_spin->setSuffix(tr(" s"));
   m_dwell_spin->setValue(2.0);
   form->addRow(tr("Dwell per step:"), m_dwell_spin);
+
+  m_sweep_count_spin = new QSpinBox();
+  m_sweep_count_spin->setRange(1, 10000);
+  m_sweep_count_spin->setValue(1);
+  m_sweep_count_spin->setSuffix(tr(" sweep(s)"));
+  m_sweep_count_spin->setToolTip(
+      tr("Repeat the complete current sweep consecutively."));
+  form->addRow(tr("Number of sweeps:"), m_sweep_count_spin);
 
   m_return_sweep_check = new QCheckBox(
       tr("Return sweep back to start after reaching the end"));
@@ -240,6 +249,12 @@ LockedRotorTestDialog::LockedRotorTestDialog(QWidget *parent)
   m_torque_value_label->setStyleSheet(
       QStringLiteral("font-size: 15px; font-weight: bold;"));
   right_layout->addWidget(m_torque_value_label);
+
+    m_temperature_value_label =
+      new QLabel(tr("Motor temperature: -- C   Drive temperature: -- C"));
+    m_temperature_value_label->setStyleSheet(
+      QStringLiteral("font-size: 15px; font-weight: bold;"));
+    right_layout->addWidget(m_temperature_value_label);
 
   m_torque_chart = new StripChart(tr("Torque (Nm)"));
   m_torque_chart->setAxisTitles(tr("s"), tr("Nm"));
@@ -456,12 +471,15 @@ void LockedRotorTestDialog::onStartClicked() {
   m_active_joint = selectedJoint();
   m_running = true;
   m_step_index = 0;
+  m_sweep_index = 0;
+  m_sweep_count = m_sweep_count_spin->value();
 
   m_joint_combo->setEnabled(false);
   m_start_spin->setEnabled(false);
   m_end_spin->setEnabled(false);
   m_step_spin->setEnabled(false);
   m_dwell_spin->setEnabled(false);
+  m_sweep_count_spin->setEnabled(false);
   m_return_sweep_check->setEnabled(false);
   m_opposite_sign_check->setEnabled(false);
   m_invert_current_check->setEnabled(false);
@@ -517,11 +535,13 @@ void LockedRotorTestDialog::beginStep(std::size_t index) {
   const double target = appliedCurrentA(m_steps_a[index]);
   emit currentSetpointRequested(m_active_joint, target, /*release=*/false);
   m_status_label->setText(
-      tr("Step %1/%2: commanding %3 A, dwelling %4 s...")
+      tr("Sweep %1/%2, step %3/%4: commanding %5 A, dwelling %6 s...")
+        .arg(m_sweep_index + 1)
+        .arg(m_sweep_count)
           .arg(index + 1)
           .arg(m_steps_a.size())
-          .arg(target, 0, 'f', 2)
-          .arg(m_dwell_spin->value(), 0, 'f', 1));
+        .arg(target, 0, 'f', 2)
+        .arg(m_dwell_spin->value(), 0, 'f', 1));
 }
 
 void LockedRotorTestDialog::appendTelemetry(const TelemetryFrame &frame) {
@@ -566,6 +586,15 @@ void LockedRotorTestDialog::appendTelemetry(const TelemetryFrame &frame) {
           .arg(m_external_daq
                    ? QString::number(externalTorqueNm(m_external_daq->latest()), 'f', 4)
                    : QStringLiteral("--")));
+    const QString motor_temp = jt.motor_temp_c >= 0
+                   ? QString::number(jt.motor_temp_c)
+                   : QStringLiteral("--");
+    const QString drive_temp = jt.drive_temp_c >= 0
+                   ? QString::number(jt.drive_temp_c)
+                   : QStringLiteral("--");
+    m_temperature_value_label->setText(
+      tr("Motor temperature: %1 C   Drive temperature: %2 C")
+        .arg(motor_temp, drive_temp));
 
   m_sum_current += jt.current_a;
   m_sum_torque += jt.torque_nm;
@@ -619,11 +648,19 @@ void LockedRotorTestDialog::finishStep() {
       m_ext_sample_count > 0 ? m_sum_ext_torque / m_ext_sample_count : 0.0;
   r.ext_avg_speed_rpm =
       m_ext_sample_count > 0 ? m_sum_ext_speed / m_ext_sample_count : 0.0;
-  appendResultRow(static_cast<int>(m_step_index) + 1, r);
+  const int result_step =
+      m_sweep_index * static_cast<int>(m_steps_a.size()) +
+      static_cast<int>(m_step_index) + 1;
+  appendResultRow(result_step, r);
 
   const std::size_t next = m_step_index + 1;
   if (next >= m_steps_a.size()) {
-    stopTest(tr("sweep complete"));
+    ++m_sweep_index;
+    if (m_sweep_index < m_sweep_count) {
+      beginStep(0);
+      return;
+    }
+    stopTest(tr("%1 sweep(s) complete").arg(m_sweep_count));
     return;
   }
   beginStep(next);
@@ -647,6 +684,7 @@ void LockedRotorTestDialog::stopTest(const QString &reason) {
   m_end_spin->setEnabled(true);
   m_step_spin->setEnabled(true);
   m_dwell_spin->setEnabled(true);
+  m_sweep_count_spin->setEnabled(true);
   m_return_sweep_check->setEnabled(true);
   m_opposite_sign_check->setEnabled(true);
   m_invert_current_check->setEnabled(true);

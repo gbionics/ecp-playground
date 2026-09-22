@@ -14,6 +14,7 @@
 QT_BEGIN_NAMESPACE
 class QComboBox;
 class QDoubleSpinBox;
+class QLabel;
 QT_END_NAMESPACE
 
 namespace actuator_test::gui {
@@ -45,6 +46,8 @@ private:
   QDoubleSpinBox *m_speed_spin = nullptr;
   QDoubleSpinBox *m_target_spin = nullptr;
   QDoubleSpinBox *m_current_spin = nullptr;
+  QLabel *m_rated_current_label = nullptr;
+  QLabel *m_torque_info_label = nullptr;
   std::vector<JointInfo> m_joints;
 };
 

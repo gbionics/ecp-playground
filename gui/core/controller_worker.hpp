@@ -33,6 +33,9 @@ struct JointInfo {
   std::string model;
   std::string operation_mode_name;
   int encoder_bits = 17;
+  double rated_current_a = 0.0;
+  double rated_torque_nm = 0.0;
+  double torque_constant_nm_per_a = 0.0;
   bool selectable = false;
   std::string unavailable_reason;
   double min_limit_deg = 0.0;

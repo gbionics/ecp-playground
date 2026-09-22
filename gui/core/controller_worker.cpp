@@ -1296,6 +1296,11 @@ void ControllerWorker::publishJointInfo() {
     info.model = jh.model;
     info.operation_mode_name = jh.operation_mode_name;
     info.encoder_bits = jh.driver ? jh.driver->encoder_bits() : jh.encoder_bits;
+    info.rated_current_a = jh.driver ? jh.driver->rated_current_a()
+                     : jh.rated_current_a;
+    info.rated_torque_nm = jh.driver ? jh.driver->rated_torque_nm()
+                     : jh.rated_torque_nm;
+    info.torque_constant_nm_per_a = jh.torque_constant_nm_per_a;
     info.selectable = jh.selectable;
     info.unavailable_reason = jh.unavailable_reason;
     info.min_limit_deg =

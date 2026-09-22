@@ -22,6 +22,7 @@
 QT_BEGIN_NAMESPACE
 class QComboBox;
 class QDoubleSpinBox;
+class QSpinBox;
 class QPushButton;
 class QLabel;
 class QTableWidget;
@@ -94,6 +95,7 @@ private:
   QDoubleSpinBox *m_end_spin = nullptr;
   QDoubleSpinBox *m_step_spin = nullptr;
   QDoubleSpinBox *m_dwell_spin = nullptr;
+  QSpinBox *m_sweep_count_spin = nullptr;
   QCheckBox *m_return_sweep_check = nullptr;
   QCheckBox *m_opposite_sign_check = nullptr;
   QCheckBox *m_invert_current_check = nullptr;
@@ -107,6 +109,7 @@ private:
   StripChart *m_torque_chart = nullptr;
   QLabel *m_current_value_label = nullptr;
   QLabel *m_torque_value_label = nullptr;
+  QLabel *m_temperature_value_label = nullptr;
   StripChart *m_iv_chart = nullptr;
   QScrollBar *m_time_scrollbar = nullptr;
   QPushButton *m_live_btn = nullptr;
@@ -130,6 +133,8 @@ private:
   std::vector<double> m_steps_a;
   std::size_t m_step_index = 0;
   std::size_t m_forward_step_count = 0; ///< Steps before the mirrored return leg.
+  int m_sweep_index = 0;
+  int m_sweep_count = 1;
   bool m_running = false;
   std::size_t m_active_joint = 0;
 

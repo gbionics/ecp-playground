@@ -28,6 +28,7 @@ public:
   virtual int32_t actual_velocity() const noexcept = 0;
   virtual double actual_current_a() const noexcept = 0;
   virtual double rated_current_a() const noexcept = 0;
+  virtual double rated_torque_nm() const noexcept { return 0.0; }
   virtual uint16_t status() const noexcept = 0;
   virtual bool fault() const noexcept = 0;
   virtual uint16_t error_code() const noexcept = 0;
@@ -61,6 +62,8 @@ struct JointHandle {
   int encoder_bits = 17;
   int32_t pvt_kp = 200;
   int32_t pvt_kd = 50;
+  double rated_current_a = 0.0;
+  double rated_torque_nm = 0.0;
   double torque_constant_nm_per_a = 0.0;
   bool selectable = false;
   std::string unavailable_reason;
