@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <numbers>
 
 namespace actuator_test::gui {
 
@@ -121,6 +122,8 @@ enum class Activity {
   Capture,    ///< Idled while tracking the travelled min/max.
   Trajectory, ///< Playing a generated trajectory.
   Current,    ///< Constant current setpoint, no position/velocity feedback.
+  CurrentRamp, ///< Minimum-jerk current transition at the real-time rate.
+  DampedCurrent, ///< Damped current sine, then a 0 A settle phase.
 };
 
 /// Decimate a raw recorded position trail into spline waypoints, mirroring the
@@ -200,6 +203,15 @@ struct ControllerWorker::Impl {
 
     // Current test
     double target_current_a = 0.0;
+    double current_ramp_start_a = 0.0;
+    double current_ramp_target_a = 0.0;
+    double current_ramp_time_s = 0.0;
+    double current_ramp_elapsed_s = 0.0;
+    double damped_amplitude_a = 0.0;
+    double damped_decay_time_s = 1.0;
+    double damped_frequency_hz = 1.0;
+    double damped_duration_s = 1.0;
+    double damped_elapsed_s = 0.0;
 
     // Trajectory
     int phase = 0; ///< ControlPhase
@@ -591,6 +603,86 @@ void ControllerWorker::handleCommand(const CurrentCommand &c) {
   }
   ct.activity = Activity::Current;
   ct.target_current_a = c.target_current_a;
+  recomputeState();
+}
+
+void ControllerWorker::handleCommand(const CurrentRampCommand &c) {
+  auto &impl = *m_impl;
+  if (c.joint >= impl.joints.size()) {
+    return;
+  }
+  auto &jh = impl.joints[c.joint];
+  auto &ct = impl.ctl[c.joint];
+  if (ct.activity == Activity::Trajectory) {
+    return;
+  }
+  if (!std::isfinite(c.target_current_a) || !std::isfinite(c.ramp_time_s) ||
+      c.ramp_time_s <= 0.0) {
+    error("invalid current ramp command for '" + jh.name + "'");
+    return;
+  }
+  if (!ct.limits_set) {
+    log("current ramp blocked on '" + jh.name +
+        "': backdrive the joint through its range to set limits first");
+    return;
+  }
+  if (!ct.engaged) {
+    engageJoint(c.joint);
+  }
+  ct.current_ramp_start_a = ct.target_current_a;
+  ct.current_ramp_target_a = c.target_current_a;
+  ct.current_ramp_time_s = c.ramp_time_s;
+  ct.current_ramp_elapsed_s = 0.0;
+  ct.safety = SafetyState{};
+  ct.activity = Activity::CurrentRamp;
+  recomputeState();
+}
+
+void ControllerWorker::handleCommand(const DampedCurrentCommand &c) {
+  auto &impl = *m_impl;
+  if (c.joint >= impl.joints.size()) {
+    return;
+  }
+  auto &jh = impl.joints[c.joint];
+  auto &ct = impl.ctl[c.joint];
+  if (ct.activity == Activity::Trajectory) {
+    return;
+  }
+  if (c.release) {
+    idleJoint(c.joint);
+    recomputeState();
+    return;
+  }
+  if (!std::isfinite(c.amplitude_a) || !std::isfinite(c.decay_time_s) ||
+      !std::isfinite(c.frequency_hz) || !std::isfinite(c.duration_s) ||
+      c.amplitude_a <= 0.0 || c.decay_time_s <= 0.0 ||
+      c.frequency_hz <= 0.0 || c.duration_s <= 0.0) {
+    error("invalid damped current command for '" + jh.name + "'");
+    return;
+  }
+  const double rated_current_a = jh.driver->rated_current_a();
+  if (rated_current_a <= 0.0 || c.amplitude_a > rated_current_a) {
+    error("damped current amplitude for '" + jh.name +
+          "' exceeds the drive's rated current");
+    return;
+  }
+  if (!ct.limits_set) {
+    log("damped current test blocked on '" + jh.name +
+        "': backdrive the joint to set limits first");
+    return;
+  }
+  if (!ct.engaged) {
+    engageJoint(c.joint);
+  }
+  ct.activity = Activity::DampedCurrent;
+  ct.damped_amplitude_a = c.amplitude_a;
+  ct.damped_decay_time_s = c.decay_time_s;
+  ct.damped_frequency_hz = c.frequency_hz;
+  ct.damped_duration_s = c.duration_s;
+  ct.damped_elapsed_s = 0.0;
+  ct.target_current_a = 0.0;
+  ct.safety = SafetyState{};
+  log("damped current settle started on '" + jh.name + "'");
   recomputeState();
 }
 
@@ -1032,7 +1124,9 @@ void ControllerWorker::controlTick() {
       break;
     }
 
-    case Activity::Current: {
+    case Activity::Current:
+    case Activity::CurrentRamp:
+    case Activity::DampedCurrent: {
       std::string reason;
       if (safety_violated(d, m_profile, jh.name, ct.safety, reason)) {
         error("safety abort on '" + jh.name + "': " + reason);
@@ -1045,6 +1139,29 @@ void ControllerWorker::controlTick() {
       d.apply_runtime_gains(0, 0);
       d.set_target_position(static_cast<int32_t>(ct.cmd_counts));
       d.set_target_velocity(0);
+      if (ct.activity == Activity::CurrentRamp) {
+        ct.target_current_a =
+            min_jerk(ct.current_ramp_elapsed_s, ct.current_ramp_time_s,
+                     ct.current_ramp_start_a, ct.current_ramp_target_a);
+        ct.current_ramp_elapsed_s += dt;
+        if (ct.current_ramp_elapsed_s >= ct.current_ramp_time_s) {
+          ct.target_current_a =
+              min_jerk(ct.current_ramp_time_s, ct.current_ramp_time_s,
+                       ct.current_ramp_start_a, ct.current_ramp_target_a);
+          ct.activity = Activity::Current;
+        }
+      } else if (ct.activity == Activity::DampedCurrent) {
+        if (ct.damped_elapsed_s < ct.damped_duration_s) {
+          ct.target_current_a =
+              ct.damped_amplitude_a *
+              std::exp(-ct.damped_elapsed_s / ct.damped_decay_time_s) *
+              std::sin(2.0 * std::numbers::pi * ct.damped_frequency_hz *
+                       ct.damped_elapsed_s);
+        } else {
+          ct.target_current_a = 0.0;
+        }
+        ct.damped_elapsed_s += dt;
+      }
       const double rated_a = d.rated_current_a();
       const double permille =
           rated_a > 0.0 ? (ct.target_current_a / rated_a * 1000.0) : 0.0;
@@ -1145,9 +1262,9 @@ void ControllerWorker::controlTick() {
     }
   }
 
-  // Publish telemetry at ~50 Hz to keep the GUI snappy without flooding.
+  // Publish telemetry at 100 Hz; EtherCAT control remains at 1 kHz.
   const int decim =
-      std::max(1, static_cast<int>(m_profile.loop_rate_hz / 50.0));
+      std::max(1, static_cast<int>(m_profile.loop_rate_hz / 100.0));
   if (impl.tick % decim == 0) {
     publishTelemetry();
     // Surface live limit updates while backdrivable.
@@ -1174,6 +1291,9 @@ void ControllerWorker::recomputeState() {
       break;
     case Activity::Jog:
     case Activity::GoTo:
+    case Activity::Current:
+    case Activity::CurrentRamp:
+    case Activity::DampedCurrent:
       manual = true;
       break;
     case Activity::Idle:
@@ -1223,6 +1343,8 @@ void ControllerWorker::publishTelemetry() {
       jt.error_deg = jt.reference_deg - jt.actual_deg;
       jt.velocity_deg_s = actuator_test::counts2deg(d.actual_velocity(), bits);
           jt.current_a = d.actual_current_a();
+          jt.commanded_current_a = ct.target_current_a;
+          jt.current_transition_active = (ct.activity == Activity::CurrentRamp);
         jt.torque_nm = jt.current_a * jh.torque_constant_nm_per_a;
           const double rated_current_a = d.rated_current_a();
           jt.torque_percent = rated_current_a > 0.0

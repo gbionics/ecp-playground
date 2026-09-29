@@ -6,6 +6,7 @@
 #include "widgets/axis_overview_panel.hpp"
 #include "widgets/connection_panel.hpp"
 #include "widgets/drives_diagnostics_panel.hpp"
+#include "widgets/damped_current_settle_panel.hpp"
 #include "widgets/enhanced_limits_panel.hpp"
 #include "widgets/event_log_panel.hpp"
 #include "widgets/jog_panel.hpp"
@@ -92,16 +93,31 @@ MainWindow::MainWindow(RuntimeProfile profile, QString default_config,
   m_worker->start();
 
   m_locked_rotor_test = new LockedRotorTestDialog(this);
+  m_damped_current_settle = new DampedCurrentSettleDialog(this);
 
   m_plot = new PlotPanel();
-  m_plot->setUpdateRate(
-      50); // Update every 50ms instead of 16ms for reduced CPU
+  m_plot->setUpdateRate(10); // Update at 100 Hz, matching telemetry.
   setCentralWidget(m_plot);
 
   buildMenu();
   buildDocks();
   initializeUpdateScheduler();
   wireSignals();
+  if (actuator_test::external_daq_supported()) {
+    actuator_test::ExternalDaqConfig external_daq_config;
+    m_external_daq =
+        std::make_shared<actuator_test::ExternalDaqReader>(external_daq_config);
+    std::string error;
+    if (m_external_daq->start(error)) {
+      appendLog(tr("Torsiometer acquisition started."));
+    } else {
+      appendLog(tr("[error] Could not start torsiometer acquisition: %1")
+                    .arg(QString::fromStdString(error)));
+      m_external_daq.reset();
+    }
+  }
+  m_locked_rotor_test->setExternalDaqReader(m_external_daq);
+  m_damped_current_settle->setExternalDaqReader(m_external_daq);
 
   // Enhanced status bar
   m_state_label = new QLabel(tr("disconnected"));
@@ -237,6 +253,13 @@ void MainWindow::buildMenu() {
     m_locked_rotor_test->raise();
     m_locked_rotor_test->activateWindow();
   });
+  auto *damped_current_action =
+      tools_menu->addAction(tr("Damped Current Settle..."));
+  connect(damped_current_action, &QAction::triggered, this, [this] {
+    m_damped_current_settle->show();
+    m_damped_current_settle->raise();
+    m_damped_current_settle->activateWindow();
+  });
 
   m_view_menu = menuBar()->addMenu(tr("&View"));
 }
@@ -335,9 +358,9 @@ void MainWindow::buildDocks() {
 
 void MainWindow::initializeUpdateScheduler() {
   // Register panels with configurable update rates
-  // Plot panel: 50ms (20 Hz) - smooth visualization without excessive repaints
+  // Plot panel: 10ms (100 Hz), matching the published telemetry cadence.
   m_update_scheduler_id_plot =
-      m_scheduler->registerPanel("PlotPanel", 50, [this]() {
+      m_scheduler->registerPanel("PlotPanel", 10, [this]() {
         // Handled by plot panel's internal update rate
       });
 
@@ -384,6 +407,18 @@ void MainWindow::wireSignals() {
           [this](std::size_t j, double a, bool release) {
             m_worker->post(CurrentCommand{j, a, release});
           });
+  connect(m_locked_rotor_test, &LockedRotorTestDialog::currentRampRequested,
+          this, [this](std::size_t j, double a, double ramp_time_s) {
+            m_worker->post(CurrentRampCommand{j, a, ramp_time_s});
+          });
+  connect(
+      m_damped_current_settle,
+      &DampedCurrentSettleDialog::dampedCurrentRequested, this,
+      [this](std::size_t j, double amplitude_a, double decay_time_s,
+             double frequency_hz, double duration_s, bool release) {
+        m_worker->post(DampedCurrentCommand{
+            j, amplitude_a, decay_time_s, frequency_hz, duration_s, release});
+      });
 
   // Enhanced limits panel signals
   connect(m_enhanced_limits, &EnhancedLimitsPanel::captureToggled, this,
@@ -500,8 +535,17 @@ void MainWindow::poll() {
   updateProfiler(frame);
   m_jog->updateLiveLimits(joints);
   m_enhanced_limits->updateLiveLimits(joints, frame.joints);
-  m_plot->appendFrame(frame);
+  std::optional<double> external_raw_torque_nm;
+  if (m_external_daq && m_external_daq->running()) {
+    external_raw_torque_nm = m_external_daq->latest().torque_nm;
+  } else if (m_external_daq && !m_external_daq_error_reported) {
+    m_external_daq_error_reported = true;
+    appendLog(tr("[error] Torsiometer acquisition stopped: %1")
+                  .arg(QString::fromStdString(m_external_daq->lastError())));
+  }
+  m_plot->appendFrame(frame, external_raw_torque_nm);
   m_locked_rotor_test->appendTelemetry(frame);
+  m_damped_current_settle->appendTelemetry(frame);
   m_scheduler->poll(static_cast<uint32_t>(m_timer->interval()));
 
   // Keep the record toggle in sync with the worker's actual state (it may stop
@@ -555,6 +599,7 @@ void MainWindow::refreshJoints(const std::vector<JointInfo> &joints) {
   m_axis_overview->setJoints(joints);
   m_drives_diagnostics->setJoints(joints);
   m_locked_rotor_test->setJoints(joints);
+  m_damped_current_settle->setJoints(joints);
   m_plot->setJoints(m_joint_names);
 
   m_table->setRowCount(static_cast<int>(joints.size()));

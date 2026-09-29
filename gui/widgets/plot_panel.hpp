@@ -17,6 +17,7 @@
 #include <QStringList>
 #include <QWidget>
 #include <deque>
+#include <optional>
 #include <vector>
 
 QT_BEGIN_NAMESPACE
@@ -43,6 +44,9 @@ public:
 
   /// Register a named series and return its index.
   int addSeries(const QString &name, const QColor &color);
+
+  /// Update a series legend label.
+  void setSeriesName(int series, const QString &name);
 
   /// Remove every series (definitions and data).
   void resetSeries();
@@ -115,7 +119,8 @@ public:
   explicit PlotPanel(QWidget *parent = nullptr);
 
   void setJoints(const QStringList &names);
-  void appendFrame(const TelemetryFrame &frame);
+  void appendFrame(const TelemetryFrame &frame,
+                   std::optional<double> external_raw_torque_nm = std::nullopt);
   void clearHistory();
 
   /// Set the update rate for plot refresh (milliseconds between updates).
@@ -150,7 +155,8 @@ private:
   };
 
   void rebuildCharts();
-  void appendSample(const TelemetryFrame &frame);
+  void appendSample(const TelemetryFrame &frame,
+                    std::optional<double> external_raw_torque_nm);
   std::vector<int> checkedJoints() const;
   static double signalValue(const JointTelemetry &j, Signal s);
   static bool signalIsSymmetric(Signal s);
@@ -187,6 +193,9 @@ private:
   // Active chart set (rebuilt on mode / selection change).
   std::vector<StripChart *> m_charts;
   std::vector<DrawItem> m_items;
+  int m_external_raw_torque_chart = -1;
+  int m_external_raw_torque_series = -1;
+  std::deque<QPointF> m_external_raw_torque_samples;
 
   QStringList m_joint_names;
   ViewMode m_mode = ViewMode::Focus;

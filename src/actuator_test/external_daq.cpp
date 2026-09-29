@@ -3,11 +3,12 @@
 
 #include "actuator_test/external_daq.hpp"
 
+#include <cmath>
+
 #if defined(ACTUATOR_TEST_HAVE_NIDAQMX)
 #include <NIDAQmx.h>
 
 #include <algorithm>
-#include <cmath>
 #include <vector>
 #endif
 
@@ -193,6 +194,17 @@ ExternalDaqReader::Sample ExternalDaqReader::latest() const {
   return m_latest;
 }
 
+bool ExternalDaqReader::tare(double offset_nm) {
+  if (!std::isfinite(offset_nm) || !m_running.load()) {
+    return false;
+  }
+  std::lock_guard<std::mutex> lk(m_mutex);
+  m_tare_offset_nm += offset_nm;
+  m_latest.torque_nm -= offset_nm;
+  m_latest.filtered_torque_nm -= offset_nm;
+  return true;
+}
+
 std::string ExternalDaqReader::lastError() const {
   std::lock_guard<std::mutex> lk(m_mutex);
   return m_last_error;
@@ -283,6 +295,8 @@ void ExternalDaqReader::run() {
     s.speed_rpm = m_impl->filtered_rpm;
 
     std::lock_guard<std::mutex> lk(m_mutex);
+    s.torque_nm -= m_tare_offset_nm;
+    s.filtered_torque_nm -= m_tare_offset_nm;
     m_latest = s;
   }
   m_running.store(false);

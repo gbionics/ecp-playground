@@ -35,7 +35,7 @@ struct ExternalDaqConfig {
   double di_sample_rate_hz = 50000.0;
   double lpf_cutoff_hz = 50.0;   ///< Torque low-pass cutoff.
   double encoder_ppr = 720.0;    ///< Encoder pulses per revolution.
-  double speed_window_s = 0.05;  ///< Speed estimation window.
+  double speed_window_s = 0.01;  ///< Speed estimation/publication window.
   // The sensor's own sign convention (e.g. CCW-positive) is independent of
   // the drive's current-command convention; set this to align the two
   // instead of inverting the commanded current (which flips direction, not
@@ -79,6 +79,11 @@ public:
   /// the first read completes).
   Sample latest() const;
 
+  /// Subtract `offset_nm` from all subsequent torque readings. The supplied
+  /// offset is in the reader's current sign convention, so passing the
+  /// measured zero-torque mean makes future readings zero-referenced.
+  bool tare(double offset_nm);
+
   /// Thread-safe: reason the acquisition thread stopped on its own (e.g. a
   /// DAQmx read error), empty if it's still running or was stopped via
   /// stop(). Cleared by the next successful start().
@@ -93,6 +98,7 @@ private:
   std::thread m_thread;
   mutable std::mutex m_mutex;
   Sample m_latest;
+  double m_tare_offset_nm = 0.0;
   std::string m_last_error;
 
   struct Impl;

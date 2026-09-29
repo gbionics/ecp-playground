@@ -14,6 +14,7 @@
 #include "core/controller_worker.hpp"
 #include "core/update_scheduler.hpp"
 
+#include "actuator_test/external_daq.hpp"
 #include "actuator_test/settings.hpp"
 
 #include <QMainWindow>
@@ -42,6 +43,7 @@ class EnhancedLimitsPanel;
 class EventLogPanel;
 class AxisOverviewPanel;
 class LockedRotorTestDialog;
+class DampedCurrentSettleDialog;
 
 class MainWindow : public QMainWindow {
   Q_OBJECT
@@ -111,6 +113,9 @@ private:
   EnhancedLimitsPanel *m_enhanced_limits = nullptr;
   EventLogPanel *m_event_log = nullptr;
   LockedRotorTestDialog *m_locked_rotor_test = nullptr;
+  DampedCurrentSettleDialog *m_damped_current_settle = nullptr;
+  std::shared_ptr<actuator_test::ExternalDaqReader> m_external_daq;
+  bool m_external_daq_error_reported = false;
 
   // --- Display tables and logs ---
   QTableWidget *m_table = nullptr;

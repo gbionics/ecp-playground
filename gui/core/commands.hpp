@@ -55,6 +55,25 @@ struct CurrentCommand {
   bool release = false;
 };
 
+/// Smoothly transition a current setpoint with a minimum-jerk profile at the
+/// real-time control rate, then hold the requested target current.
+struct CurrentRampCommand {
+  std::size_t joint = 0;
+  double target_current_a = 0.0;
+  double ramp_time_s = 0.0;
+};
+
+/// Apply a zero-centred exponentially damped sinusoidal current at the
+/// real-time control rate, then hold 0 A until explicitly released.
+struct DampedCurrentCommand {
+  std::size_t joint = 0;
+  double amplitude_a = 0.0;
+  double decay_time_s = 1.0;
+  double frequency_hz = 1.0;
+  double duration_s = 1.0;
+  bool release = false;
+};
+
 /// Begin or end a backdrive limit-capture session for a set of joints.  While
 /// active the controller idles the drives and tracks the min/max travelled.
 struct CaptureLimitsCommand {
@@ -103,8 +122,10 @@ struct ShutdownCommand {};
 
 using Command =
     std::variant<ConnectCommand, DisconnectCommand, JogCommand, GoToCommand,
-                 CurrentCommand, CaptureLimitsCommand, SetLimitsCommand,
-                 ResetLimitsCommand, StartTrajectoryCommand, StopCommand,
+                 CurrentCommand, CurrentRampCommand, CaptureLimitsCommand,
+                 SetLimitsCommand,
+                 DampedCurrentCommand, ResetLimitsCommand,
+                 StartTrajectoryCommand, StopCommand,
                  ResetFaultCommand, PauseCommand, RecordCommand, ShutdownCommand>;
 
 } // namespace actuator_test::gui

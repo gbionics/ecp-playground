@@ -4,9 +4,9 @@
 // Locked-rotor characterisation test: with the shaft mechanically blocked,
 // drives a single joint through a programmable current sweep (bypassing
 // position/velocity feedback, same as the manual "current test" in JogPanel)
-// and records commanded/actual current and output torque at each step. This
-// is the standard way to verify a motor's torque constant (Kt) and check for
-// current/torque non-linearities without any actual motion.
+// and records commanded/actual current, output torque and drive temperatures.
+// This is the standard way to verify a motor's torque constant (Kt) and check
+// for current/torque non-linearities without any actual motion.
 
 #pragma once
 
@@ -17,6 +17,7 @@
 #include <QDialog>
 #include <QString>
 #include <memory>
+#include <optional>
 #include <vector>
 
 QT_BEGIN_NAMESPACE
@@ -51,6 +52,11 @@ public:
   /// True while a sweep is actively stepping through current levels.
   bool isRunning() const { return m_running; }
 
+  /// Uses the app-wide DAQ reader so the locked-rotor result and the main
+  /// dashboard observe the same physical torsiometer sample.
+  void setExternalDaqReader(
+      std::shared_ptr<actuator_test::ExternalDaqReader> external_daq);
+
 signals:
   /// Commands a constant current setpoint (A) on `joint`. When `release` is
   /// true the joint's current-control test is released back to a held
@@ -58,6 +64,8 @@ signals:
   /// commanded verbatim, including a genuine 0 A step.
   void currentSetpointRequested(std::size_t joint, double target_current_a,
                                 bool release);
+  void currentRampRequested(std::size_t joint, double target_current_a,
+                            double ramp_time_s);
 
 private:
   struct StepResult {
@@ -68,6 +76,23 @@ private:
     double peak_torque_nm = 0.0;
     double ext_avg_torque_nm = 0.0; ///< External DAQ verification (if enabled).
     double ext_avg_speed_rpm = 0.0;
+  };
+
+  struct RawSample {
+    double t_s = 0.0;
+    double step_elapsed_s = 0.0;
+    int sweep_number = 0;
+    int step_number = 0;
+    double target_current_a = 0.0;
+    double commanded_current_a = 0.0;
+    double actual_current_a = 0.0;
+    double drive_torque_nm = 0.0;
+    int16_t motor_temp_c = -1;
+    int16_t drive_temp_c = -1;
+    bool plateau = false;
+    std::optional<double> external_selected_torque_nm;
+    std::optional<double> external_raw_torque_nm;
+    std::optional<double> external_speed_rpm;
   };
 
   void onStartClicked();
@@ -87,8 +112,9 @@ private:
   double appliedCurrentA(double requested_a) const;
 
   /// Picks the filtered or raw torque sample per the low-pass filter
-  /// checkbox.
+  /// checkbox, then applies the polarity selected for this view.
   double externalTorqueNm(const actuator_test::ExternalDaqReader::Sample &s) const;
+  double externalTorqueSign() const;
 
   QComboBox *m_joint_combo = nullptr;
   QDoubleSpinBox *m_start_spin = nullptr;
@@ -98,7 +124,10 @@ private:
   QSpinBox *m_sweep_count_spin = nullptr;
   QCheckBox *m_return_sweep_check = nullptr;
   QCheckBox *m_opposite_sign_check = nullptr;
+  QCheckBox *m_negative_only_check = nullptr;
   QCheckBox *m_invert_current_check = nullptr;
+  QCheckBox *m_smooth_transition_check = nullptr;
+  QDoubleSpinBox *m_ramp_time_spin = nullptr;
   QCheckBox *m_confirm_check = nullptr;
   QPushButton *m_start_btn = nullptr;
   QPushButton *m_stop_btn = nullptr;
@@ -107,9 +136,7 @@ private:
   QTableWidget *m_results_table = nullptr;
   StripChart *m_current_chart = nullptr;
   StripChart *m_torque_chart = nullptr;
-  QLabel *m_current_value_label = nullptr;
-  QLabel *m_torque_value_label = nullptr;
-  QLabel *m_temperature_value_label = nullptr;
+  StripChart *m_temperature_chart = nullptr;
   StripChart *m_iv_chart = nullptr;
   QScrollBar *m_time_scrollbar = nullptr;
   QPushButton *m_live_btn = nullptr;
@@ -123,7 +150,9 @@ private:
   QLineEdit *m_ext_digital_a_edit = nullptr;
   QLineEdit *m_ext_digital_b_edit = nullptr;
   QLabel *m_ext_daq_status_label = nullptr;
-  std::unique_ptr<actuator_test::ExternalDaqReader> m_external_daq;
+  std::shared_ptr<actuator_test::ExternalDaqReader> m_app_external_daq;
+  std::shared_ptr<actuator_test::ExternalDaqReader> m_external_daq;
+  bool m_owns_external_daq = false;
   double m_sum_ext_torque = 0.0;
   double m_sum_ext_speed = 0.0;
   int m_ext_sample_count = 0;
@@ -131,6 +160,7 @@ private:
 
   std::vector<JointInfo> m_joints;
   std::vector<double> m_steps_a;
+  std::vector<RawSample> m_raw_samples;
   std::size_t m_step_index = 0;
   std::size_t m_forward_step_count = 0; ///< Steps before the mirrored return leg.
   int m_sweep_index = 0;
@@ -139,7 +169,11 @@ private:
   std::size_t m_active_joint = 0;
 
   bool m_have_step_t0 = false;
+  bool m_have_step_command_t0 = false;
+  bool m_waiting_for_ramp = false;
+  bool m_ramp_observed = false;
   double m_step_t0_s = 0.0;
+  double m_step_command_t0_s = 0.0;
   double m_sum_current = 0.0;
   double m_sum_torque = 0.0;
   double m_peak_current = 0.0;
@@ -149,6 +183,8 @@ private:
   int m_series_cmd = -1;
   int m_series_current = -1;
   int m_series_torque = -1;
+  int m_series_motor_temperature = -1;
+  int m_series_drive_temperature = -1;
   int m_series_iv_drive_up = -1;
   int m_series_iv_drive_down = -1;
   int m_series_iv_ext_up = -1;

@@ -36,6 +36,14 @@ int StripChart::addSeries(const QString &name, const QColor &color) {
   return static_cast<int>(m_series.size()) - 1;
 }
 
+void StripChart::setSeriesName(int series, const QString &name) {
+  if (series < 0 || series >= static_cast<int>(m_series.size())) {
+    return;
+  }
+  m_series[static_cast<std::size_t>(series)].name = name;
+  update();
+}
+
 void StripChart::resetSeries() {
   m_series.clear();
   m_latest_x = 0.0;
@@ -542,6 +550,8 @@ void PlotPanel::rebuildCharts() {
   // Tear down previous charts.
   m_items.clear();
   m_charts.clear();
+  m_external_raw_torque_chart = -1;
+  m_external_raw_torque_series = -1;
   QLayoutItem *item = nullptr;
   while ((item = m_charts_layout->takeAt(0)) != nullptr) {
     if (QWidget *w = item->widget()) {
@@ -611,9 +621,11 @@ void PlotPanel::rebuildCharts() {
     const int c_current = add_chart(tr("Current [A]"), true, 1);
     const int s_current =
       m_charts[c_current]->addSeries(tr("current"), QColor(240, 180, 70));
-    const int c_torque = add_chart(tr("Torque [Nm]"), true, 1);
-    const int s_torque =
-      m_charts[c_torque]->addSeries(tr("torque"), QColor(90, 210, 210));
+    m_external_raw_torque_chart =
+        add_chart(tr("External raw torque [Nm]"), true, 1);
+    m_external_raw_torque_series =
+        m_charts[m_external_raw_torque_chart]->addSeries(
+            tr("torsiometer raw"), QColor(90, 210, 210));
 
     if (j >= 0) {
       m_items.push_back({c_pos, s_ref, j, Signal::PositionRef,
@@ -629,8 +641,6 @@ void PlotPanel::rebuildCharts() {
       m_items.push_back({c_foll, s_foll, j, Signal::FollowingError,
                          Signal::PositionActual, false});
       m_items.push_back({c_current, s_current, j, Signal::Current,
-             Signal::PositionActual, false});
-      m_items.push_back({c_torque, s_torque, j, Signal::Torque,
              Signal::PositionActual, false});
     }
     break;
@@ -686,6 +696,7 @@ void PlotPanel::clearHistory() {
   for (auto *c : m_charts) {
     c->clearAll();
   }
+  m_external_raw_torque_samples.clear();
   m_elapsed_ms = 0;
 }
 
@@ -703,7 +714,9 @@ void PlotPanel::setFrozen(bool frozen) {
   }
 }
 
-void PlotPanel::appendSample(const TelemetryFrame &frame) {
+void PlotPanel::appendSample(
+    const TelemetryFrame &frame,
+    std::optional<double> external_raw_torque_nm) {
   for (const auto &it : m_items) {
     if (it.joint < 0 ||
         static_cast<std::size_t>(it.joint) >= frame.joints.size()) {
@@ -717,9 +730,43 @@ void PlotPanel::appendSample(const TelemetryFrame &frame) {
     const double x = it.xy ? signalValue(j, it.x_sig) : frame.t_s;
     m_charts[static_cast<std::size_t>(it.chart)]->append(it.series, x, y);
   }
+  if (external_raw_torque_nm && m_external_raw_torque_chart >= 0 &&
+      static_cast<std::size_t>(m_external_raw_torque_chart) <
+          m_charts.size()) {
+    if (!m_external_raw_torque_samples.empty() &&
+        frame.t_s < m_external_raw_torque_samples.back().x()) {
+      m_external_raw_torque_samples.clear();
+    }
+    m_external_raw_torque_samples.emplace_back(frame.t_s,
+                                                *external_raw_torque_nm);
+    constexpr double moving_average_window_s = 0.5;
+    while (m_external_raw_torque_samples.size() > 1 &&
+           m_external_raw_torque_samples.front().x() <
+               frame.t_s - moving_average_window_s) {
+      m_external_raw_torque_samples.pop_front();
+    }
+    double moving_average_nm = 0.0;
+    for (const QPointF &sample : m_external_raw_torque_samples) {
+      moving_average_nm += sample.y();
+    }
+    moving_average_nm /=
+        static_cast<double>(m_external_raw_torque_samples.size());
+
+    auto *chart =
+        m_charts[static_cast<std::size_t>(m_external_raw_torque_chart)];
+    chart->setSeriesName(
+        m_external_raw_torque_series,
+        tr("torsiometer raw: %1 Nm | average 0.5 s: %2 Nm")
+            .arg(*external_raw_torque_nm, 0, 'f', 3)
+            .arg(moving_average_nm, 0, 'f', 3));
+    chart->append(m_external_raw_torque_series, frame.t_s,
+                  *external_raw_torque_nm);
+  }
 }
 
-void PlotPanel::appendFrame(const TelemetryFrame &frame) {
+void PlotPanel::appendFrame(
+    const TelemetryFrame &frame,
+    std::optional<double> external_raw_torque_nm) {
   if (m_frozen) {
     return; // Live updates paused; keep the current window on screen.
   }
@@ -738,7 +785,7 @@ void PlotPanel::appendFrame(const TelemetryFrame &frame) {
   last_update_time = now_ms;
   m_elapsed_ms = 0;
 
-  appendSample(frame);
+  appendSample(frame, external_raw_torque_nm);
 }
 
 } // namespace actuator_test::gui
