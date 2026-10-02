@@ -5,12 +5,13 @@
 
 #include "widgets/axis_overview_panel.hpp"
 #include "widgets/connection_panel.hpp"
-#include "widgets/drives_diagnostics_panel.hpp"
 #include "widgets/damped_current_settle_panel.hpp"
+#include "widgets/drives_diagnostics_panel.hpp"
 #include "widgets/enhanced_limits_panel.hpp"
 #include "widgets/event_log_panel.hpp"
 #include "widgets/jog_panel.hpp"
 #include "widgets/locked_rotor_test_panel.hpp"
+#include "widgets/no_load_test_panel.hpp"
 #include "widgets/plot_panel.hpp"
 #include "widgets/trajectory_panel.hpp"
 
@@ -94,6 +95,7 @@ MainWindow::MainWindow(RuntimeProfile profile, QString default_config,
 
   m_locked_rotor_test = new LockedRotorTestDialog(this);
   m_damped_current_settle = new DampedCurrentSettleDialog(this);
+  m_no_load_test = new NoLoadTestDialog(this);
 
   m_plot = new PlotPanel();
   m_plot->setUpdateRate(10); // Update at 100 Hz, matching telemetry.
@@ -118,6 +120,7 @@ MainWindow::MainWindow(RuntimeProfile profile, QString default_config,
   }
   m_locked_rotor_test->setExternalDaqReader(m_external_daq);
   m_damped_current_settle->setExternalDaqReader(m_external_daq);
+  m_no_load_test->setExternalDaqReader(m_external_daq);
 
   // Enhanced status bar
   m_state_label = new QLabel(tr("disconnected"));
@@ -180,8 +183,8 @@ MainWindow::MainWindow(RuntimeProfile profile, QString default_config,
 
   m_reset_fault_btn = new QPushButton(tr("Reset Fault"));
   m_reset_fault_btn->setEnabled(false);
-  m_reset_fault_btn->setToolTip(
-      tr("Request a DS402 fault reset on every drive, then leave all drives idle."));
+  m_reset_fault_btn->setToolTip(tr("Request a DS402 fault reset on every "
+                                   "drive, then leave all drives idle."));
   m_reset_fault_btn->setAccessibleName(tr("Reset drive faults"));
   statusBar()->addPermanentWidget(m_reset_fault_btn);
 
@@ -195,6 +198,8 @@ MainWindow::MainWindow(RuntimeProfile profile, QString default_config,
   m_shortcut_estop =
       new QShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+E")), this);
   m_shortcut_stop = new QShortcut(QKeySequence(QStringLiteral("Esc")), this);
+  m_shortcut_estop->setContext(Qt::ApplicationShortcut);
+  m_shortcut_stop->setContext(Qt::ApplicationShortcut);
   m_shortcut_pause =
       new QShortcut(QKeySequence(QStringLiteral("Ctrl+Space")), this);
   m_shortcut_play =
@@ -209,7 +214,13 @@ MainWindow::MainWindow(RuntimeProfile profile, QString default_config,
   m_timer->start();
 }
 
-MainWindow::~MainWindow() = default;
+MainWindow::~MainWindow() {
+  m_no_load_test->stopTest(tr("Application closing"));
+  // Destroy before the worker and app-wide DAQ, cancelling unfinished
+  // downloads.
+  delete m_no_load_test;
+  m_no_load_test = nullptr;
+}
 
 void MainWindow::buildMenu() {
   auto *file_menu = menuBar()->addMenu(tr("File"));
@@ -246,9 +257,10 @@ void MainWindow::buildMenu() {
   });
 
   auto *tools_menu = menuBar()->addMenu(tr("&Tools"));
-  auto *locked_rotor_action =
-      tools_menu->addAction(tr("Locked-Rotor Test..."));
+  auto *locked_rotor_action = tools_menu->addAction(tr("Locked-Rotor Test..."));
   connect(locked_rotor_action, &QAction::triggered, this, [this] {
+    if (m_no_load_test->isBusy())
+      return;
     m_locked_rotor_test->show();
     m_locked_rotor_test->raise();
     m_locked_rotor_test->activateWindow();
@@ -256,9 +268,18 @@ void MainWindow::buildMenu() {
   auto *damped_current_action =
       tools_menu->addAction(tr("Damped Current Settle..."));
   connect(damped_current_action, &QAction::triggered, this, [this] {
+    if (m_no_load_test->isBusy())
+      return;
     m_damped_current_settle->show();
     m_damped_current_settle->raise();
     m_damped_current_settle->activateWindow();
+  });
+  auto *no_load_action = tools_menu->addAction(tr("No-load Speed Test..."));
+  connect(no_load_action, &QAction::triggered, this, [this] {
+    updateToolOwnership();
+    m_no_load_test->show();
+    m_no_load_test->raise();
+    m_no_load_test->activateWindow();
   });
 
   m_view_menu = menuBar()->addMenu(tr("&View"));
@@ -383,75 +404,117 @@ void MainWindow::initializeUpdateScheduler() {
 void MainWindow::wireSignals() {
   connect(m_connection, &ConnectionPanel::connectRequested, this,
           [this](const QString &p) {
+            if (m_no_load_test->isBusy())
+              return;
             m_worker->post(ConnectCommand{p.toStdString()});
           });
-  connect(m_connection, &ConnectionPanel::disconnectRequested, this,
-          [this] { m_worker->post(DisconnectCommand{}); });
+  connect(m_connection, &ConnectionPanel::disconnectRequested, this, [this] {
+    m_no_load_test->stopTest(tr("Disconnect requested"));
+    m_worker->post(DisconnectCommand{});
+  });
 
-  connect(
-      m_jog, &JogPanel::jogRequested, this,
-      [this](std::size_t j, double v) { m_worker->post(JogCommand{j, v}); });
+  connect(m_jog, &JogPanel::jogRequested, this,
+          [this](std::size_t j, double v) {
+            if (!m_no_load_test->isBusy())
+              m_worker->post(JogCommand{j, v});
+          });
   connect(m_jog, &JogPanel::goToRequested, this,
           [this](std::size_t j, double d, double s) {
+            if (m_no_load_test->isBusy())
+              return;
             m_worker->post(GoToCommand{j, d, s});
           });
-  connect(m_jog, &JogPanel::stopRequested, this,
-          [this] { m_worker->post(StopCommand{}); });
+  connect(m_jog, &JogPanel::stopRequested, this, [this] { stopAllMotion(); });
   connect(m_jog, &JogPanel::currentRequested, this,
           [this](std::size_t j, double a) {
+            if (m_no_load_test->isBusy())
+              return;
             m_worker->post(CurrentCommand{j, a});
           });
 
-  connect(m_locked_rotor_test,
-          &LockedRotorTestDialog::currentSetpointRequested, this,
-          [this](std::size_t j, double a, bool release) {
+  connect(m_locked_rotor_test, &LockedRotorTestDialog::currentSetpointRequested,
+          this, [this](std::size_t j, double a, bool release) {
+            if (m_no_load_test->isBusy())
+              return;
             m_worker->post(CurrentCommand{j, a, release});
           });
   connect(m_locked_rotor_test, &LockedRotorTestDialog::currentRampRequested,
           this, [this](std::size_t j, double a, double ramp_time_s) {
+            if (m_no_load_test->isBusy())
+              return;
             m_worker->post(CurrentRampCommand{j, a, ramp_time_s});
           });
-  connect(
-      m_damped_current_settle,
-      &DampedCurrentSettleDialog::dampedCurrentRequested, this,
-      [this](std::size_t j, double amplitude_a, double decay_time_s,
-             double frequency_hz, double duration_s, bool release) {
-        m_worker->post(DampedCurrentCommand{
-            j, amplitude_a, decay_time_s, frequency_hz, duration_s, release});
-      });
+  connect(m_damped_current_settle,
+          &DampedCurrentSettleDialog::dampedCurrentRequested, this,
+          [this](std::size_t j, double amplitude_a, double decay_time_s,
+                 double frequency_hz, double duration_s, bool release) {
+            if (m_no_load_test->isBusy())
+              return;
+            m_damped_current_active = !release;
+            m_worker->post(DampedCurrentCommand{j, amplitude_a, decay_time_s,
+                                                frequency_hz, duration_s,
+                                                release});
+          });
+  connect(m_no_load_test, &NoLoadTestDialog::busyChanged, this,
+          &MainWindow::updateToolOwnership);
+  connect(m_no_load_test, &NoLoadTestDialog::speedHoldRequested, this,
+          [this](std::size_t joint, double velocity, double ramp,
+                 bool continuous, bool release, int32_t kp, int32_t kd) {
+            if (!release && otherTestBusy()) {
+              m_no_load_test->stopTest(
+                  tr("Another test owns motion / acquisition"));
+              return;
+            }
+            m_worker->post(
+                SpeedHoldCommand{joint, velocity, ramp, continuous, release,
+                                 kp, kd});
+          });
 
   // Enhanced limits panel signals
   connect(m_enhanced_limits, &EnhancedLimitsPanel::captureToggled, this,
           [this](bool start) {
+            if (m_no_load_test->isBusy())
+              return;
             m_worker->post(CaptureLimitsCommand{
                 {m_enhanced_limits->currentJoint()}, start});
           });
   connect(m_enhanced_limits, &EnhancedLimitsPanel::setLimitsRequested, this,
           [this](std::size_t j, double mn, double mx) {
+            if (m_no_load_test->isBusy())
+              return;
             m_worker->post(SetLimitsCommand{j, mn, mx});
           });
   connect(m_enhanced_limits, &EnhancedLimitsPanel::resetLimitsRequested, this,
-          [this](std::size_t j) { m_worker->post(ResetLimitsCommand{j}); });
+          [this](std::size_t j) {
+            if (!m_no_load_test->isBusy())
+              m_worker->post(ResetLimitsCommand{j});
+          });
 
   connect(m_trajectory, &TrajectoryPanel::playRequested, this,
           [this](TrajectoryMode mode, bool log) {
+            if (m_no_load_test->isBusy())
+              return;
             m_worker->post(StartTrajectoryCommand{
                 m_connection->selectedIndices(), mode, log});
           });
   connect(m_trajectory, &TrajectoryPanel::splineRecordToggled, this,
           [this](bool start) {
+            if (m_no_load_test->isBusy())
+              return;
             m_worker->post(
                 CaptureLimitsCommand{m_connection->selectedIndices(), start});
           });
-  connect(m_trajectory, &TrajectoryPanel::pauseRequested, this,
-          [this] { m_worker->post(PauseCommand{}); });
+  connect(m_trajectory, &TrajectoryPanel::pauseRequested, this, [this] {
+    if (!m_no_load_test->isBusy())
+      m_worker->post(PauseCommand{});
+  });
   connect(m_trajectory, &TrajectoryPanel::stopRequested, this,
-          [this] { m_worker->post(StopCommand{}); });
+          [this] { stopAllMotion(); });
 
   connect(m_estop_btn, &QPushButton::clicked, this,
-          [this] { m_worker->post(StopCommand{}); });
-    connect(m_reset_fault_btn, &QPushButton::clicked, this,
-      [this] { m_worker->post(ResetFaultCommand{}); });
+          [this] { stopAllMotion(); });
+  connect(m_reset_fault_btn, &QPushButton::clicked, this,
+          [this] { m_worker->post(ResetFaultCommand{}); });
   connect(m_store_homing_btn, &QPushButton::clicked, this, [this] {
     exportOffsetsXmlToPath(QDir::currentPath() +
                                QStringLiteral("/build/joint-offsets.xml"),
@@ -463,12 +526,12 @@ void MainWindow::wireSignals() {
 
   connect(m_shortcut_estop, &QShortcut::activated, this, [this] {
     if (m_estop_btn->isEnabled()) {
-      m_worker->post(StopCommand{});
+      stopAllMotion();
     }
   });
   connect(m_shortcut_stop, &QShortcut::activated, this, [this] {
     if (m_last_state != ControllerState::Disconnected) {
-      m_worker->post(StopCommand{});
+      stopAllMotion();
     }
   });
   connect(m_shortcut_pause, &QShortcut::activated, this, [this] {
@@ -477,7 +540,8 @@ void MainWindow::wireSignals() {
     }
   });
   connect(m_shortcut_play, &QShortcut::activated, this, [this] {
-    if (m_last_state != ControllerState::Disconnected) {
+    if (m_last_state != ControllerState::Disconnected &&
+        !m_no_load_test->isBusy()) {
       m_worker->post(StartTrajectoryCommand{m_connection->selectedIndices(),
                                             m_trajectory->selectedMode(),
                                             m_trajectory->loggingEnabled()});
@@ -491,6 +555,8 @@ void MainWindow::wireSignals() {
 }
 
 void MainWindow::requestConnect(const QString &config_path) {
+  if (m_no_load_test->isBusy())
+    return;
   m_worker->post(ConnectCommand{config_path.toStdString()});
 }
 
@@ -501,6 +567,9 @@ void MainWindow::poll() {
       appendLog(QString::fromStdString(ev.message));
       break;
     case WorkerEvent::Kind::Error:
+      if (m_no_load_test->isBusy())
+        m_no_load_test->stopTest(
+            tr("Worker error: %1").arg(QString::fromStdString(ev.message)));
       appendLog(QStringLiteral("[error] ") +
                 QString::fromStdString(ev.message));
       {
@@ -546,6 +615,8 @@ void MainWindow::poll() {
   m_plot->appendFrame(frame, external_raw_torque_nm);
   m_locked_rotor_test->appendTelemetry(frame);
   m_damped_current_settle->appendTelemetry(frame);
+  m_no_load_test->appendTelemetry(frame);
+  updateToolOwnership();
   m_scheduler->poll(static_cast<uint32_t>(m_timer->interval()));
 
   // Keep the record toggle in sync with the worker's actual state (it may stop
@@ -600,6 +671,7 @@ void MainWindow::refreshJoints(const std::vector<JointInfo> &joints) {
   m_drives_diagnostics->setJoints(joints);
   m_locked_rotor_test->setJoints(joints);
   m_damped_current_settle->setJoints(joints);
+  m_no_load_test->setJoints(joints);
   m_plot->setJoints(m_joint_names);
 
   m_table->setRowCount(static_cast<int>(joints.size()));
@@ -618,15 +690,45 @@ void MainWindow::applyState(ControllerState state) {
   m_enhanced_limits->setState(state);
 
   const bool connected = (state != ControllerState::Disconnected);
-  const bool busy = (state == ControllerState::Running);
+  const bool busy =
+      (state == ControllerState::Running) || m_no_load_test->isBusy();
   m_jog->setEnabledControls(connected && !busy);
-  m_trajectory->setEnabled(connected);
+  m_trajectory->setEnabled(connected && !m_no_load_test->isBusy());
   m_trajectory->setRunning(state == ControllerState::Running);
   m_trajectory->setCapturing(state == ControllerState::Capturing);
   m_estop_btn->setEnabled(connected);
   m_reset_fault_btn->setEnabled(state == ControllerState::Faulted);
   m_store_homing_btn->setEnabled(connected);
   m_record_btn->setEnabled(connected);
+  updateToolOwnership();
+}
+
+bool MainWindow::otherTestBusy() const {
+  // Locked-rotor exposes motion state but not its asynchronous supply download.
+  // Its active timer retains ownership until that download finishes.
+  bool supply_busy = false;
+  for (auto *timer : m_locked_rotor_test->findChildren<QTimer *>())
+    supply_busy = supply_busy || timer->isActive();
+  return m_locked_rotor_test->isRunning() || supply_busy ||
+         m_damped_current_active || m_locked_rotor_test->isVisible() ||
+         m_damped_current_settle->isVisible();
+}
+
+void MainWindow::updateToolOwnership() {
+  const bool busy = m_no_load_test->isBusy();
+  m_no_load_test->setAvailable(!otherTestBusy());
+  m_locked_rotor_test->setEnabled(!busy);
+  m_damped_current_settle->setEnabled(!busy);
+  const bool connected = m_last_state != ControllerState::Disconnected;
+  m_jog->setEnabledControls(connected &&
+                            m_last_state != ControllerState::Running && !busy);
+  m_trajectory->setEnabled(connected && !busy);
+  m_enhanced_limits->setEnabled(!busy);
+}
+
+void MainWindow::stopAllMotion() {
+  m_no_load_test->stopTest(tr("Global Stop requested"));
+  m_worker->post(StopCommand{});
 }
 
 void MainWindow::appendLog(const QString &line) {

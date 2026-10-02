@@ -8,9 +8,11 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDateTime>
+#include <QDir>
 #include <QDoubleSpinBox>
 #include <QFile>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
@@ -19,13 +21,16 @@
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QSaveFile>
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QSpinBox>
 #include <QSplitter>
+#include <QStandardPaths>
 #include <QTableWidget>
 #include <QTableWidgetItem>
 #include <QTextStream>
+#include <QTimer>
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -193,6 +198,40 @@ LockedRotorTestDialog::LockedRotorTestDialog(QWidget *parent)
 
   updateExternalDaqAvailability();
 
+  // --- Optional internally timed DC supply acquisition --------------------
+  auto *psu_box = new QGroupBox(tr("DC power supply (optional)"));
+  auto *psu_form = new QFormLayout(psu_box);
+  m_psu_check = new QCheckBox(tr("Acquire ITECH voltage/current with ELOG"));
+  psu_form->addRow(m_psu_check);
+  m_psu_host_edit = new QLineEdit(
+      QString::fromStdString(actuator_test::PowerSupplyConfig{}.host));
+  psu_form->addRow(tr("Supply IP:"), m_psu_host_edit);
+  m_psu_period_spin = new QDoubleSpinBox();
+  m_psu_period_spin->setDecimals(4);
+  m_psu_period_spin->setRange(0.0001, 100.0);
+  m_psu_period_spin->setValue(0.01);
+  m_psu_period_spin->setSuffix(tr(" s"));
+  psu_form->addRow(tr("ELOG sample period:"), m_psu_period_spin);
+  m_psu_duration_spin = new QDoubleSpinBox();
+  m_psu_duration_spin->setDecimals(4);
+  m_psu_duration_spin->setRange(0.01, 86400.0);
+  m_psu_duration_spin->setValue(30.0);
+  m_psu_duration_spin->setSuffix(tr(" s"));
+  psu_form->addRow(tr("ELOG duration:"), m_psu_duration_spin);
+  connect(m_psu_period_spin, &QDoubleSpinBox::valueChanged, this,
+          [this](double period) { m_psu_duration_spin->setMinimum(period); });
+  m_psu_status_label = new QLabel(
+      tr("Finite ELOG acquisition; plots appear after download. Sweep end/STOP "
+         "aborts ELOG and downloads partial data. Output settings are "
+         "unchanged."));
+  m_psu_status_label->setWordWrap(true);
+  psu_form->addRow(m_psu_status_label);
+  layout->addWidget(psu_box);
+  m_psu_timer = new QTimer(this);
+  m_psu_timer->setInterval(100);
+  connect(m_psu_timer, &QTimer::timeout, this,
+          &LockedRotorTestDialog::updatePowerSupply);
+
   // --- Controls ------------------------------------------------------------
   auto *btn_row = new QHBoxLayout();
   m_start_btn = new QPushButton(tr("Start Sweep"));
@@ -279,6 +318,24 @@ LockedRotorTestDialog::LockedRotorTestDialog(QWidget *parent)
   m_series_drive_temperature = m_temperature_chart->addSeries(
       tr("drive"), QColor(180, 120, 245));
   right_layout->addWidget(m_temperature_chart, 1);
+
+  m_psu_power_chart = new StripChart(tr("DC supply power (W, ELOG)"));
+  m_psu_power_chart->setAxisTitles(tr("ELOG-relative s"), tr("W"));
+  m_psu_power_chart->setMinimumHeight(220);
+  m_psu_power_chart->setPannable(true);
+  m_psu_power_chart->setMaxPoints(200000);
+  m_series_psu_power =
+      m_psu_power_chart->addSeries(tr("power"), QColor(240, 90, 90));
+  right_layout->addWidget(m_psu_power_chart, 1);
+
+  m_psu_current_chart = new StripChart(tr("DC supply current (A, ELOG)"));
+  m_psu_current_chart->setAxisTitles(tr("ELOG-relative s"), tr("A"));
+  m_psu_current_chart->setMinimumHeight(220);
+  m_psu_current_chart->setPannable(true);
+  m_psu_current_chart->setMaxPoints(200000);
+  m_series_psu_current =
+      m_psu_current_chart->addSeries(tr("current"), QColor(90, 200, 230));
+  right_layout->addWidget(m_psu_current_chart, 1);
 
   m_iv_chart = new StripChart(tr("Current vs Torque (per-step average)"));
   m_iv_chart->setAxisTitles(tr("A"), tr("Nm"));
@@ -414,7 +471,7 @@ double LockedRotorTestDialog::externalTorqueSign() const {
 void LockedRotorTestDialog::updateStartEnabled() {
   const bool ok = m_confirm_check->isChecked() && !m_joints.empty() &&
                   m_joint_combo->currentIndex() >= 0;
-  m_start_btn->setEnabled(ok && !m_running);
+  m_start_btn->setEnabled(ok && !m_running && !m_psu);
 }
 
 void LockedRotorTestDialog::updateExternalDaqAvailability() {
@@ -491,7 +548,7 @@ void LockedRotorTestDialog::buildSteps() {
 }
 
 void LockedRotorTestDialog::onStartClicked() {
-  if (m_running || m_joints.empty()) {
+  if (m_running || m_psu || m_joints.empty()) {
     return;
   }
   buildSteps();
@@ -501,13 +558,19 @@ void LockedRotorTestDialog::onStartClicked() {
 
   m_results_table->setRowCount(0);
   m_raw_samples.clear();
+  m_psu_samples.clear();
+  m_psu_interrupted = false;
   m_current_chart->clearAll();
   m_torque_chart->clearAll();
   m_temperature_chart->clearAll();
   m_iv_chart->clearAll();
+  m_psu_power_chart->clearAll();
+  m_psu_current_chart->clearAll();
   m_current_chart->followLatest();
   m_torque_chart->followLatest();
   m_temperature_chart->followLatest();
+  m_psu_power_chart->followLatest();
+  m_psu_current_chart->followLatest();
   m_scrub_updating = true;
   m_time_scrollbar->setRange(0, 0);
   m_scrub_updating = false;
@@ -571,6 +634,22 @@ void LockedRotorTestDialog::onStartClicked() {
                      m_ext_digital_b_edit->text()));
       }
     }
+  }
+
+  m_psu_check->setEnabled(false);
+  m_psu_host_edit->setEnabled(false);
+  m_psu_period_spin->setEnabled(false);
+  m_psu_duration_spin->setEnabled(false);
+  if (m_psu_check->isChecked()) {
+    actuator_test::PowerSupplyConfig psu_cfg;
+    psu_cfg.host = m_psu_host_edit->text().trimmed().toStdString();
+    psu_cfg.sample_period_s = m_psu_period_spin->value();
+    psu_cfg.duration_s = m_psu_duration_spin->value();
+    m_psu = std::make_unique<actuator_test::PowerSupplyReader>(psu_cfg);
+    m_psu->start();
+    m_psu_timer->start();
+  } else {
+    m_psu_status_label->setText(tr("ELOG disabled for this sweep."));
   }
 
   beginStep(0);
@@ -775,6 +854,14 @@ void LockedRotorTestDialog::stopTest(const QString &reason) {
     }
     m_owns_external_daq = false;
   }
+  if (m_psu) {
+    m_psu->requestStop();
+    m_psu_status_label->setText(tr("Stopping ELOG / downloading data..."));
+  }
+  m_psu_check->setEnabled(!m_psu);
+  m_psu_host_edit->setEnabled(!m_psu);
+  m_psu_period_spin->setEnabled(!m_psu);
+  m_psu_duration_spin->setEnabled(!m_psu);
 
   m_joint_combo->setEnabled(true);
   m_start_spin->setEnabled(true);
@@ -790,11 +877,99 @@ void LockedRotorTestDialog::stopTest(const QString &reason) {
   m_ramp_time_spin->setEnabled(m_smooth_transition_check->isChecked());
   m_confirm_check->setEnabled(true);
   m_stop_btn->setEnabled(false);
-  m_export_btn->setEnabled(!m_raw_samples.empty());
+  m_export_btn->setEnabled(!m_psu &&
+                           (!m_raw_samples.empty() || !m_psu_samples.empty()));
   updateStartEnabled();
   updateExternalDaqAvailability();
 
   m_status_label->setText(tr("Idle (%1).").arg(reason));
+}
+
+void LockedRotorTestDialog::updatePowerSupply() {
+  m_psu_status_label->setText(QString::fromStdString(m_psu->status()));
+  if (!m_psu->finished()) {
+    return;
+  }
+  const QString result = QString::fromStdString(m_psu->status());
+  m_psu_status_label->setText(result);
+  m_psu_interrupted = m_psu->interrupted();
+  m_psu_samples = m_psu->takeSamples();
+  m_psu.reset();
+  m_psu_timer->stop();
+
+  if (!m_psu_samples.empty()) {
+    const double window =
+        std::max(m_psu_period_spin->value(),
+                 m_psu_samples.back().t_s + m_psu_period_spin->value());
+    for (auto *chart : {m_psu_power_chart, m_psu_current_chart}) {
+      chart->setMaxPoints(m_psu_samples.size() + 1);
+      chart->setWindowSeconds(window);
+      chart->followLatest();
+    }
+    for (const auto &sample : m_psu_samples) {
+      m_psu_power_chart->append(m_series_psu_power, sample.t_s, sample.power_w);
+      m_psu_current_chart->append(m_series_psu_current, sample.t_s,
+                                  sample.current_a);
+    }
+    const QString directory =
+        QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
+    if (directory.isEmpty() || !QDir().mkpath(directory)) {
+      showPowerSupplyWarning(
+          tr("Could not create the automatic ELOG save directory. "
+             "Data remains in memory; export it before the next sweep."));
+    } else {
+      const QString path = QDir(directory).filePath(
+          QStringLiteral("locked-rotor-%1-supply.csv")
+              .arg(QDateTime::currentDateTimeUtc().toString(
+                  QStringLiteral("yyyyMMdd-HHmmss-zzz"))));
+      if (savePowerSupplyCsv(path)) {
+        m_psu_status_label->setText(tr("%1\nSaved to %2").arg(result, path));
+      }
+    }
+  }
+  if (result.contains(QStringLiteral("error:")) ||
+      result.contains(QStringLiteral("WARNING:"))) {
+    showPowerSupplyWarning(result);
+  }
+  m_psu_check->setEnabled(!m_running);
+  m_psu_host_edit->setEnabled(!m_running);
+  m_psu_period_spin->setEnabled(!m_running);
+  m_psu_duration_spin->setEnabled(!m_running);
+  m_export_btn->setEnabled(!m_running &&
+                           (!m_raw_samples.empty() || !m_psu_samples.empty()));
+  updateStartEnabled();
+}
+
+bool LockedRotorTestDialog::savePowerSupplyCsv(const QString &path) {
+  QSaveFile file(path);
+  if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+    showPowerSupplyWarning(tr("Could not write %1: %2\nData remains in memory.")
+                               .arg(path, file.errorString()));
+    return false;
+  }
+  QTextStream out(&file);
+  out.setRealNumberPrecision(17);
+  out << "elog_time_s,supply_voltage_v,supply_current_a,supply_power_w,"
+         "interrupted\n";
+  for (const auto &sample : m_psu_samples) {
+    out << sample.t_s << ',' << sample.voltage_v << ',' << sample.current_a
+        << ',' << sample.power_w << ',' << (m_psu_interrupted ? 1 : 0) << '\n';
+  }
+  out.flush();
+  if (out.status() != QTextStream::Ok || !file.commit()) {
+    showPowerSupplyWarning(tr("Could not save %1: %2\nData remains in memory.")
+                               .arg(path, file.errorString()));
+    return false;
+  }
+  return true;
+}
+
+void LockedRotorTestDialog::showPowerSupplyWarning(const QString &message) {
+  auto *warning = new QMessageBox(QMessageBox::Warning, tr("ITECH ELOG"),
+                                  message, QMessageBox::Ok, this);
+  warning->setAttribute(Qt::WA_DeleteOnClose);
+  warning->setWindowModality(Qt::NonModal);
+  warning->show();
 }
 
 void LockedRotorTestDialog::appendResultRow(int step_number,
@@ -829,7 +1004,7 @@ void LockedRotorTestDialog::appendResultRow(int step_number,
 }
 
 void LockedRotorTestDialog::exportResultsCsv() {
-  if (m_raw_samples.empty()) {
+  if (m_psu || (m_raw_samples.empty() && m_psu_samples.empty())) {
     return;
   }
   const QString suggested =
@@ -872,6 +1047,26 @@ void LockedRotorTestDialog::exportResultsCsv() {
       out << *sample.external_speed_rpm;
     }
     out << '\n';
+  }
+  out.flush();
+  if (out.status() != QTextStream::Ok || file.error() != QFileDevice::NoError) {
+    QMessageBox::warning(
+        this, tr("Export Results"),
+        tr("Could not finish writing %1: %2").arg(path, file.errorString()));
+    return;
+  }
+  if (!m_psu_samples.empty()) {
+    const QFileInfo info(path);
+    const QString supply_path = info.dir().filePath(
+        info.completeBaseName() + QStringLiteral("-supply.csv"));
+    if (QFile::exists(supply_path) &&
+        QMessageBox::question(
+            this, tr("Export ELOG"),
+            tr("Replace existing file %1?").arg(supply_path)) !=
+            QMessageBox::Yes) {
+      return;
+    }
+    savePowerSupplyCsv(supply_path);
   }
 }
 

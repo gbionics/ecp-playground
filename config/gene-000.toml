@@ -416,9 +416,9 @@ name        = "l_ankle_motor_1"
 driver      = "MT_Device"
 alias       = 1405
 model       = "X6-60"
-max_torque  = 1000
-PVT_KP      = 20000
-PVT_KD      = 0
+max_torque  = 10000
+PVT_KP      = 40000
+PVT_KD      = 5000
 
 [[devices]]
 name        = "l_ankle_motor_2"

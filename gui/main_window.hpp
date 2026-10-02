@@ -44,6 +44,7 @@ class EventLogPanel;
 class AxisOverviewPanel;
 class LockedRotorTestDialog;
 class DampedCurrentSettleDialog;
+class NoLoadTestDialog;
 
 class MainWindow : public QMainWindow {
   Q_OBJECT
@@ -94,6 +95,9 @@ private:
   void exportOffsetsXmlToPath(const QString &path, bool silent = false);
   void exportTelemetrySnapshot();
   void updateProfiler(const TelemetryFrame &frame);
+  void updateToolOwnership();
+  bool otherTestBusy() const;
+  void stopAllMotion();
 
   // --- Core components ---
   std::unique_ptr<ControllerWorker> m_worker;
@@ -114,6 +118,8 @@ private:
   EventLogPanel *m_event_log = nullptr;
   LockedRotorTestDialog *m_locked_rotor_test = nullptr;
   DampedCurrentSettleDialog *m_damped_current_settle = nullptr;
+  NoLoadTestDialog *m_no_load_test = nullptr;
+  bool m_damped_current_active = false;
   std::shared_ptr<actuator_test::ExternalDaqReader> m_external_daq;
   bool m_external_daq_error_reported = false;
 

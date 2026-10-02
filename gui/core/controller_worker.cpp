@@ -9,6 +9,7 @@
 #include "actuator_test/runtime.hpp"
 #include "actuator_test/safety.hpp"
 #include "actuator_test/session.hpp"
+#include "actuator_test/speed_hold.hpp"
 #include "actuator_test/trajectory.hpp"
 
 #include <ethercat-primer/core>
@@ -124,6 +125,7 @@ enum class Activity {
   Current,    ///< Constant current setpoint, no position/velocity feedback.
   CurrentRamp, ///< Minimum-jerk current transition at the real-time rate.
   DampedCurrent, ///< Damped current sine, then a 0 A settle phase.
+  SpeedHold,    ///< Velocity feedback in PVT, with optional continuous rotation.
 };
 
 /// Decimate a raw recorded position trail into spline waypoints, mirroring the
@@ -196,6 +198,10 @@ struct ControllerWorker::Impl {
     // Jog / GoTo
     double cmd_counts = 0.0; ///< Integrated command position.
     double jog_vel_deg_s = 0.0;
+    SpeedHoldReference speed_hold;
+    int32_t speed_hold_kp = 0;
+    int32_t speed_hold_kd = 0;
+    bool continuous_rotation = false;
     double goto_start = 0.0;
     double goto_target = 0.0;
     double goto_T = 0.0;
@@ -299,6 +305,25 @@ bool ControllerWorker::popCommand(Command &out) {
   return true;
 }
 
+void ControllerWorker::dispatchCommand(const Command &cmd) {
+  const bool speed_hold_active =
+      std::any_of(m_impl->ctl.begin(), m_impl->ctl.end(), [](const auto &ct) {
+        return ct.activity == Activity::SpeedHold;
+      });
+  const bool allowed =
+      std::holds_alternative<SpeedHoldCommand>(cmd) ||
+      std::holds_alternative<StopCommand>(cmd) ||
+      std::holds_alternative<DisconnectCommand>(cmd) ||
+      std::holds_alternative<ResetFaultCommand>(cmd) ||
+      std::holds_alternative<RecordCommand>(cmd) ||
+      std::holds_alternative<ShutdownCommand>(cmd);
+  if (speed_hold_active && !allowed) {
+    error("command blocked: stop the no-load speed test first");
+    return;
+  }
+  std::visit([&](const auto &c) { handleCommand(c); }, cmd);
+}
+
 void ControllerWorker::waitForCommand() {
   std::unique_lock<std::mutex> lk(m_cmd_mutex);
   m_cmd_cv.wait(lk,
@@ -379,6 +404,9 @@ void ControllerWorker::idleJoint(std::size_t i) {
   c.engaged = false;
   c.activity = Activity::Idle;
   c.jog_vel_deg_s = 0.0;
+  c.continuous_rotation = false;
+  c.speed_hold_kp = 0;
+  c.speed_hold_kd = 0;
   c.target_current_a = 0.0;
   if (c.logger && c.logger->is_open()) {
     c.logger->close();
@@ -396,7 +424,7 @@ void ControllerWorker::run() {
       waitForCommand();
       Command cmd;
       while (popCommand(cmd)) {
-        std::visit([&](auto &&c) { this->handleCommand(c); }, cmd);
+        dispatchCommand(cmd);
         if (m_shutdown.load()) {
           break;
         }
@@ -407,7 +435,7 @@ void ControllerWorker::run() {
     // --- one 1 kHz control tick ---------------------------------------
     Command cmd;
     while (popCommand(cmd)) {
-      std::visit([&](auto &&c) { this->handleCommand(c); }, cmd);
+      dispatchCommand(cmd);
     }
     if (m_shutdown.load()) {
       break;
@@ -567,6 +595,80 @@ void ControllerWorker::handleCommand(const JogCommand &c) {
   }
   ct.activity = Activity::Jog;
   ct.jog_vel_deg_s = c.velocity_deg_s;
+  recomputeState();
+}
+
+void ControllerWorker::handleCommand(const SpeedHoldCommand &c) {
+  auto &impl = *m_impl;
+  if (c.joint >= impl.joints.size()) {
+    error("invalid joint for no-load speed test");
+    return;
+  }
+  auto &jh = impl.joints[c.joint];
+  auto &ct = impl.ctl[c.joint];
+  if (c.release) {
+    if (ct.activity == Activity::SpeedHold) {
+      idleJoint(c.joint);
+      recomputeState();
+    }
+    return;
+  }
+  if (!impl.bus_up || m_state.load() == ControllerState::Disconnected ||
+      m_state.load() == ControllerState::Faulted || !jh.driver ||
+      !jh.selectable || jh.operation_mode_code != ecp::DS402::OP_PVT ||
+      jh.driver->kind() != DriverKind::MyActuator) {
+    error("no-load speed test requires an available OP_PVT actuator "
+          "without faults");
+    return;
+  }
+  if (c.pvt_kp < 0 || c.pvt_kd < 0 ||
+      (c.pvt_kp == 0 && c.pvt_kd == 0)) {
+    error("invalid PVT gains on '" + jh.name + "': KP=" +
+          std::to_string(c.pvt_kp) + ", KD=" + std::to_string(c.pvt_kd) +
+          "; gains must be non-negative and at least one must be positive");
+    return;
+  }
+  if (!valid_speed_hold_parameters(c.velocity_deg_s, c.ramp_time_s,
+                                  jh.driver->encoder_bits(), c.pvt_kd,
+                                  c.pvt_kp)) {
+    error("invalid no-load speed/ramp or encoder/PDO range on '" + jh.name +
+          "'");
+    return;
+  }
+  if (std::any_of(impl.ctl.begin(), impl.ctl.end(), [](const auto &other) {
+        return other.activity != Activity::Idle &&
+               other.activity != Activity::Capture;
+      })) {
+    error("no-load speed test blocked: stop other motion first");
+    return;
+  }
+  if (!c.continuous_rotation && !ct.limits_set) {
+    error("no-load speed test requires travel limits or confirmed "
+          "continuous rotation");
+    return;
+  }
+  std::string reason;
+  ct.safety = SafetyState{};
+  if (safety_violated(*jh.driver, m_profile, jh.name, ct.safety, reason)) {
+    error("no-load speed test blocked on '" + jh.name + "': " + reason);
+    return;
+  }
+  engageJoint(c.joint);
+  ct.speed_hold.reset(c.velocity_deg_s, c.ramp_time_s,
+                      jh.driver->encoder_bits(), jh.driver->actual_position(),
+                      c.pvt_kp > 0);
+  ct.speed_hold_kp = c.pvt_kp;
+  ct.speed_hold_kd = c.pvt_kd;
+  ct.continuous_rotation = c.continuous_rotation;
+  ct.activity = Activity::SpeedHold;
+  ct.target_current_a = 0.0;
+  jh.driver->set_target_torque(0);
+  jh.driver->apply_runtime_gains(ct.speed_hold_kp, ct.speed_hold_kd);
+  log("no-load speed hold started on '" + jh.name +
+      (c.continuous_rotation ? "' (continuous rotation)"
+                             : "' (travel limits active)") +
+      "; KP=" + std::to_string(ct.speed_hold_kp) +
+      ", KD=" + std::to_string(ct.speed_hold_kd));
   recomputeState();
 }
 
@@ -1097,6 +1199,48 @@ void ControllerWorker::controlTick() {
       break;
     }
 
+    case Activity::SpeedHold: {
+      std::string reason;
+      if (safety_violated(d, m_profile, jh.name, ct.safety, reason)) {
+        error("no-load speed safety abort on '" + jh.name + "': " + reason);
+        idleJoint(i);
+        setState(ControllerState::Faulted, reason);
+        break;
+      }
+      const int32_t velocity_counts = ct.speed_hold.step(dt);
+      const int32_t actual = d.actual_position();
+      if (ct.speed_hold_kp > 0 &&
+          !ct.speed_hold.position_safe(actual, d.actual_velocity(), dt)) {
+        error("no-load speed test stopped before position-count rollover on '" +
+              jh.name + "'; KP=0 avoids the integrated position reference");
+        idleJoint(i);
+        recomputeState();
+        break;
+      }
+      const double reference =
+          ct.speed_hold_kp > 0 ? ct.speed_hold.position_counts()
+                               : static_cast<double>(actual);
+      if (!ct.continuous_rotation) {
+        const bool soft_valid = ct.soft_max_counts > ct.soft_min_counts;
+        const double lo = soft_valid ? ct.soft_min_counts : ct.min_counts;
+        const double hi = soft_valid ? ct.soft_max_counts : ct.max_counts;
+        if (speed_hold_reaches_limit(actual, velocity_counts,
+                                    d.actual_velocity(), lo, hi, dt) ||
+            reference < lo || reference > hi) {
+          error("no-load speed test stopped at travel limit on '" + jh.name + "'");
+          idleJoint(i);
+          recomputeState();
+          break;
+        }
+      }
+      ct.cmd_counts = std::round(reference);
+      d.apply_runtime_gains(ct.speed_hold_kp, ct.speed_hold_kd);
+      d.set_target_position(static_cast<int32_t>(ct.cmd_counts));
+      d.set_target_velocity(velocity_counts);
+      d.set_target_torque(0);
+      break;
+    }
+
     case Activity::Jog: {
       ct.cmd_counts +=
           static_cast<double>(deg2counts(ct.jog_vel_deg_s * dt, bits));
@@ -1294,6 +1438,7 @@ void ControllerWorker::recomputeState() {
     case Activity::Current:
     case Activity::CurrentRamp:
     case Activity::DampedCurrent:
+    case Activity::SpeedHold:
       manual = true;
       break;
     case Activity::Idle:
@@ -1345,6 +1490,13 @@ void ControllerWorker::publishTelemetry() {
           jt.current_a = d.actual_current_a();
           jt.commanded_current_a = ct.target_current_a;
           jt.current_transition_active = (ct.activity == Activity::CurrentRamp);
+      jt.speed_hold_active = ct.activity == Activity::SpeedHold;
+      jt.speed_hold_target_deg_s =
+          jt.speed_hold_active ? ct.speed_hold.target_deg_s() : 0.0;
+      jt.speed_hold_kp = jt.speed_hold_active ? ct.speed_hold_kp : 0;
+      jt.speed_hold_kd = jt.speed_hold_active ? ct.speed_hold_kd : 0;
+      jt.continuous_rotation =
+          jt.speed_hold_active && ct.continuous_rotation;
         jt.torque_nm = jt.current_a * jh.torque_constant_nm_per_a;
           const double rated_current_a = d.rated_current_a();
           jt.torque_percent = rated_current_a > 0.0
@@ -1369,6 +1521,9 @@ void ControllerWorker::publishTelemetry() {
       }
       ct.prev_ref_deg = jt.reference_deg;
       ct.prev_ref_t_s = frame.t_s;
+      if (jt.speed_hold_active) {
+        jt.ref_velocity_deg_s = ct.speed_hold.velocity_deg_s();
+      }
 
       jt.min_limit_deg = actuator_test::counts2deg(ct.min_counts, bits);
       jt.max_limit_deg = actuator_test::counts2deg(ct.max_counts, bits);
@@ -1387,6 +1542,10 @@ void ControllerWorker::publishTelemetry() {
           jt.actual_deg < jt.min_limit_deg || jt.actual_deg > jt.max_limit_deg;
       jt.limit_violation = jt.actual_deg < jt.soft_min_limit_deg ||
                            jt.actual_deg > jt.soft_max_limit_deg;
+      if (jt.continuous_rotation) {
+        jt.hard_limit_violation = false;
+        jt.limit_violation = false;
+      }
 
       jt.following_error_deg = jt.error_deg;
       jt.motor_temp_c =
@@ -1418,6 +1577,8 @@ void ControllerWorker::publishJointInfo() {
     info.model = jh.model;
     info.operation_mode_name = jh.operation_mode_name;
     info.encoder_bits = jh.driver ? jh.driver->encoder_bits() : jh.encoder_bits;
+    info.pvt_kp = jh.pvt_kp;
+    info.pvt_kd = jh.pvt_kd;
     info.rated_current_a = jh.driver ? jh.driver->rated_current_a()
                      : jh.rated_current_a;
     info.rated_torque_nm = jh.driver ? jh.driver->rated_torque_nm()

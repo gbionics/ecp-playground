@@ -59,6 +59,7 @@ add_library(
     src/actuator_test/device.cpp
     src/actuator_test/external_daq.cpp
     src/actuator_test/logging.cpp
+    src/actuator_test/power_supply.cpp
     src/actuator_test/runtime.cpp
     src/actuator_test/safety.cpp
     src/actuator_test/session.cpp

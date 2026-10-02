@@ -11,6 +11,7 @@
 #pragma once
 
 #include "actuator_test/external_daq.hpp"
+#include "actuator_test/power_supply.hpp"
 #include "core/controller_worker.hpp"
 #include "core/telemetry.hpp"
 
@@ -30,6 +31,7 @@ class QTableWidget;
 class QCheckBox;
 class QLineEdit;
 class QScrollBar;
+class QTimer;
 QT_END_NAMESPACE
 
 namespace actuator_test::gui {
@@ -106,6 +108,9 @@ private:
   std::size_t selectedJoint() const;
   void updateStartEnabled();
   void updateExternalDaqAvailability();
+  void updatePowerSupply();
+  bool savePowerSupplyCsv(const QString &path);
+  void showPowerSupplyWarning(const QString &message);
 
   /// Applies the polarity inversion (if the checkbox is checked) so the
   /// actually-commanded value matches what's shown in the chart/table.
@@ -190,6 +195,20 @@ private:
   int m_series_iv_ext_up = -1;
   int m_series_iv_ext_down = -1;
   int m_series_ext_raw_torque = -1;
+
+  QCheckBox *m_psu_check = nullptr;
+  QLineEdit *m_psu_host_edit = nullptr;
+  QDoubleSpinBox *m_psu_period_spin = nullptr;
+  QDoubleSpinBox *m_psu_duration_spin = nullptr;
+  QLabel *m_psu_status_label = nullptr;
+  QTimer *m_psu_timer = nullptr;
+  StripChart *m_psu_power_chart = nullptr;
+  StripChart *m_psu_current_chart = nullptr;
+  int m_series_psu_power = -1;
+  int m_series_psu_current = -1;
+  std::unique_ptr<actuator_test::PowerSupplyReader> m_psu;
+  std::vector<actuator_test::PowerSupplyReader::Sample> m_psu_samples;
+  bool m_psu_interrupted = false;
 };
 
 } // namespace actuator_test::gui

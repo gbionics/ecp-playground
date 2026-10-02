@@ -32,6 +32,18 @@ struct JogCommand {
   double velocity_deg_s = 0.0;
 };
 
+/// PVT speed hold with temporary gains and an integrated position for KP>0.
+/// Continuous rotation skips only the position envelope for this activity.
+struct SpeedHoldCommand {
+  std::size_t joint = 0;
+  double velocity_deg_s = 0.0;
+  double ramp_time_s = 1.0;
+  bool continuous_rotation = false;
+  bool release = false;
+  int32_t pvt_kp = 0;
+  int32_t pvt_kd = 0;
+};
+
 /// Smoothly drive one joint to an absolute target angle (used by homing and
 /// "go to centre").  Clamped to soft limits.
 struct GoToCommand {
@@ -121,11 +133,10 @@ struct PauseCommand {};
 struct ShutdownCommand {};
 
 using Command =
-    std::variant<ConnectCommand, DisconnectCommand, JogCommand, GoToCommand,
-                 CurrentCommand, CurrentRampCommand, CaptureLimitsCommand,
-                 SetLimitsCommand,
-                 DampedCurrentCommand, ResetLimitsCommand,
-                 StartTrajectoryCommand, StopCommand,
+    std::variant<ConnectCommand, DisconnectCommand, JogCommand, SpeedHoldCommand,
+                 GoToCommand, CurrentCommand, CurrentRampCommand,
+                 CaptureLimitsCommand, SetLimitsCommand, DampedCurrentCommand,
+                 ResetLimitsCommand, StartTrajectoryCommand, StopCommand,
                  ResetFaultCommand, PauseCommand, RecordCommand, ShutdownCommand>;
 
 } // namespace actuator_test::gui

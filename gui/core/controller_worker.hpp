@@ -33,6 +33,8 @@ struct JointInfo {
   std::string model;
   std::string operation_mode_name;
   int encoder_bits = 17;
+  int32_t pvt_kp = 0;
+  int32_t pvt_kd = 0;
   double rated_current_a = 0.0;
   double rated_torque_nm = 0.0;
   double torque_constant_nm_per_a = 0.0;
@@ -93,6 +95,7 @@ private:
   // --- thread plumbing ---------------------------------------------------
   void run();                    ///< Worker thread entry point.
   bool popCommand(Command &out); ///< Non-blocking dequeue (control loop).
+  void dispatchCommand(const Command &cmd);
   void waitForCommand();         ///< Block until a command arrives (idle).
   void pushEvent(WorkerEvent ev);
   void log(std::string msg);
@@ -112,6 +115,7 @@ private:
   void handleCommand(const ConnectCommand &c);
   void handleCommand(const DisconnectCommand &c);
   void handleCommand(const JogCommand &c);
+  void handleCommand(const SpeedHoldCommand &c);
   void handleCommand(const GoToCommand &c);
   void handleCommand(const CurrentCommand &c);
   void handleCommand(const CurrentRampCommand &c);
