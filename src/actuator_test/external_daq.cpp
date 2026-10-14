@@ -4,11 +4,14 @@
 #include "actuator_test/external_daq.hpp"
 
 #include <cmath>
+#include <stdexcept>
+#include <utility>
 
 #if defined(ACTUATOR_TEST_HAVE_NIDAQMX)
 #include <NIDAQmx.h>
 
 #include <algorithm>
+#include <deque>
 #include <vector>
 #endif
 
@@ -32,6 +35,32 @@ std::string last_daqmx_error() {
   char buf[2048] = {};
   DAQmxGetExtendedErrorInfo(buf, sizeof(buf));
   return std::string(buf);
+}
+
+void check_daqmx(int32 status) {
+  if (status < 0)
+    throw std::runtime_error(last_daqmx_error());
+}
+
+bool valid_config(const ExternalDaqConfig &cfg) {
+  const auto positive = [](double value) {
+    return std::isfinite(value) && value > 0.0;
+  };
+  return positive(cfg.ai_sample_rate_hz) && positive(cfg.di_sample_rate_hz) &&
+         positive(cfg.publish_period_s) && positive(cfg.speed_window_s) &&
+         positive(cfg.torque_sensitivity_v_per_nm) &&
+         positive(cfg.encoder_ppr) && std::isfinite(cfg.encoder_ppr * 4.0) &&
+         positive(cfg.lpf_cutoff_hz) &&
+         cfg.lpf_cutoff_hz < cfg.ai_sample_rate_hz / 2.0 &&
+         // Reject products outside the integer ranges used by NI and DSP.
+         cfg.ai_sample_rate_hz * 4.0 < std::ldexp(1.0, 64) &&
+         cfg.di_sample_rate_hz * 4.0 < std::ldexp(1.0, 64) &&
+         cfg.ai_sample_rate_hz * cfg.publish_period_s < std::ldexp(1.0, 31) &&
+         // The two DI channels also use signed (di_read + i) indexing.
+         cfg.di_sample_rate_hz * cfg.publish_period_s < std::ldexp(1.0, 30) &&
+         // Leave room for the retained edge chunk and the next appended chunk.
+         cfg.di_sample_rate_hz * cfg.speed_window_s <
+             std::ldexp(1.0, 63) - std::ldexp(1.0, 31);
 }
 
 /// 2nd-order Butterworth low-pass (bilinear transform), equivalent to
@@ -64,31 +93,38 @@ private:
 
 /// X4 quadrature transition table indexed by (previous_state << 2) |
 /// current_state; mirrors QUADRATURE_TRANSITIONS in the Python reference.
-constexpr int kQuadratureTransitions[16] = {0,  1, -1, 0, -1, 0, 0, 1,
-                                            1, 0,  0, -1, 0, -1, 1, 0};
+constexpr int kQuadratureTransitions[16] = {0, 1, -1, 0,  -1, 0,  0, 1,
+                                            1, 0, 0,  -1, 0,  -1, 1, 0};
 
 } // namespace
 
 struct ExternalDaqReader::Impl {
-  TaskHandle ai_task = nullptr;
-  TaskHandle di_task = nullptr;
-  Biquad torque_lpf;
+  explicit Impl(ExternalDaqReader &reader) : owner(reader) {}
+  ~Impl() {
+    for (const auto task : {di_task, ai_task}) {
+      if (!task)
+        continue;
+      if ((task == ai_task ? ai_started : di_started))
+        cleanup(DAQmxStopTask(task), "DAQmxStopTask");
+      cleanup(DAQmxClearTask(task), "DAQmxClearTask");
+    }
+  }
+  void cleanup(int32 status, const char *operation) {
+    if (status >= 0)
+      return;
+    const auto detail = last_daqmx_error();
+    std::lock_guard<std::mutex> lock(owner.m_mutex);
+    if (!owner.m_last_error.empty())
+      owner.m_last_error += "; ";
+    owner.m_last_error += std::string(operation) + " failed: " + detail;
+  }
 
-  int prev_quad_state = -1;
-  int64_t speed_window_count = 0;
-  int64_t speed_window_samples = 0;
-  double filtered_rpm = 0.0;
-
-  explicit Impl(const ExternalDaqConfig &cfg)
-      : torque_lpf(cfg.lpf_cutoff_hz, cfg.ai_sample_rate_hz) {}
+  ExternalDaqReader &owner;
+  TaskHandle ai_task = nullptr, di_task = nullptr;
+  bool ai_started = false, di_started = false;
 };
 
-#endif // ACTUATOR_TEST_HAVE_NIDAQMX
-
-#if !defined(ACTUATOR_TEST_HAVE_NIDAQMX)
-// Trivial definition so std::unique_ptr<Impl> has a complete type to destroy
-// even when built without NI-DAQmx (start() always fails before one is ever
-// allocated).
+#else
 struct ExternalDaqReader::Impl {};
 #endif
 
@@ -105,65 +141,56 @@ bool ExternalDaqReader::start(std::string &error) {
   if (m_running.load()) {
     return true;
   }
-  auto impl = std::make_unique<Impl>(m_cfg);
+  // A failed worker is no longer running, but its thread is still joinable.
+  stop();
+  if (!valid_config(m_cfg)) {
+    error = "invalid DAQ configuration (rates, DSP parameters or buffer sizes)";
+    return false;
+  }
+  try {
+    auto impl = std::make_unique<Impl>(*this);
+    auto cfg = m_cfg;
+    check_daqmx(DAQmxCreateTask("", &impl->ai_task));
+    check_daqmx(DAQmxCreateAIVoltageChan(
+        impl->ai_task, cfg.analog_channel.c_str(), "", DAQmx_Val_NRSE, -10.0,
+        10.0, DAQmx_Val_Volts, nullptr));
+    check_daqmx(DAQmxCfgSampClkTiming(
+        impl->ai_task, "", cfg.ai_sample_rate_hz, DAQmx_Val_Rising,
+        DAQmx_Val_ContSamps, static_cast<uInt64>(cfg.ai_sample_rate_hz * 4)));
 
-  int32 status = DAQmxCreateTask("", &impl->ai_task);
-  if (status) {
-    error = last_daqmx_error();
-    return false;
-  }
-  status = DAQmxCreateAIVoltageChan(impl->ai_task, m_cfg.analog_channel.c_str(),
-                                    "", DAQmx_Val_NRSE, -10.0, 10.0,
-                                    DAQmx_Val_Volts, nullptr);
-  if (status == 0) {
-    status = DAQmxCfgSampClkTiming(
-        impl->ai_task, "", m_cfg.ai_sample_rate_hz, DAQmx_Val_Rising,
-        DAQmx_Val_ContSamps,
-        static_cast<uInt64>(m_cfg.ai_sample_rate_hz * 4)); // ~4 s buffer
-  }
-  if (status) {
-    error = last_daqmx_error();
-    DAQmxClearTask(impl->ai_task);
-    return false;
-  }
+    check_daqmx(DAQmxCreateTask("", &impl->di_task));
+    const std::string lines = cfg.digital_line_a + "," + cfg.digital_line_b;
+    check_daqmx(DAQmxCreateDIChan(impl->di_task, lines.c_str(), "",
+                                  DAQmx_Val_ChanPerLine));
+    check_daqmx(DAQmxCfgSampClkTiming(
+        impl->di_task, "", cfg.di_sample_rate_hz, DAQmx_Val_Rising,
+        DAQmx_Val_ContSamps, static_cast<uInt64>(cfg.di_sample_rate_hz * 4)));
+    check_daqmx(DAQmxGetSampClkRate(impl->ai_task, &cfg.ai_sample_rate_hz));
+    check_daqmx(DAQmxGetSampClkRate(impl->di_task, &cfg.di_sample_rate_hz));
+    if (!valid_config(cfg))
+      throw std::runtime_error(
+          "invalid DAQ configuration for negotiated sample rates");
+    check_daqmx(DAQmxStartTask(impl->ai_task));
+    impl->ai_started = true;
+    check_daqmx(DAQmxStartTask(impl->di_task));
+    impl->di_started = true;
 
-  status = DAQmxCreateTask("", &impl->di_task);
-  if (status) {
-    error = last_daqmx_error();
-    DAQmxClearTask(impl->ai_task);
+    m_cfg = std::move(cfg);
+    m_impl = std::move(impl);
+    m_stop_requested.store(false);
+    m_running.store(true);
+    {
+      std::lock_guard<std::mutex> lk(m_mutex);
+      m_latest = {};
+      m_last_error.clear();
+    }
+    m_thread = std::thread([this] { run(); });
+  } catch (const std::exception &ex) {
+    m_running.store(false);
+    m_impl.reset();
+    error = ex.what();
     return false;
   }
-  const std::string lines = m_cfg.digital_line_a + "," + m_cfg.digital_line_b;
-  status = DAQmxCreateDIChan(impl->di_task, lines.c_str(), "",
-                             DAQmx_Val_ChanPerLine);
-  if (status == 0) {
-    status = DAQmxCfgSampClkTiming(
-        impl->di_task, "", m_cfg.di_sample_rate_hz, DAQmx_Val_Rising,
-        DAQmx_Val_ContSamps,
-        static_cast<uInt64>(m_cfg.di_sample_rate_hz * 4)); // ~4 s buffer
-  }
-  if (status) {
-    error = last_daqmx_error();
-    DAQmxClearTask(impl->ai_task);
-    DAQmxClearTask(impl->di_task);
-    return false;
-  }
-
-  if (DAQmxStartTask(impl->ai_task) || DAQmxStartTask(impl->di_task)) {
-    error = last_daqmx_error();
-    DAQmxClearTask(impl->ai_task);
-    DAQmxClearTask(impl->di_task);
-    return false;
-  }
-
-  m_impl = std::move(impl);
-  m_stop_requested.store(false);
-  m_running.store(true);
-  {
-    std::lock_guard<std::mutex> lk(m_mutex);
-    m_last_error.clear();
-  }
-  m_thread = std::thread([this] { run(); });
   return true;
 #endif
 }
@@ -174,17 +201,7 @@ void ExternalDaqReader::stop() {
   if (m_thread.joinable()) {
     m_thread.join();
   }
-  if (m_impl) {
-    if (m_impl->ai_task) {
-      DAQmxStopTask(m_impl->ai_task);
-      DAQmxClearTask(m_impl->ai_task);
-    }
-    if (m_impl->di_task) {
-      DAQmxStopTask(m_impl->di_task);
-      DAQmxClearTask(m_impl->di_task);
-    }
-    m_impl.reset();
-  }
+  m_impl.reset();
   m_running.store(false);
 #endif
 }
@@ -205,6 +222,11 @@ bool ExternalDaqReader::tare(double offset_nm) {
   return true;
 }
 
+double ExternalDaqReader::tareOffsetNm() const {
+  std::lock_guard<std::mutex> lk(m_mutex);
+  return m_tare_offset_nm;
+}
+
 std::string ExternalDaqReader::lastError() const {
   std::lock_guard<std::mutex> lk(m_mutex);
   return m_last_error;
@@ -213,91 +235,116 @@ std::string ExternalDaqReader::lastError() const {
 #if defined(ACTUATOR_TEST_HAVE_NIDAQMX)
 
 void ExternalDaqReader::run() {
+  Biquad torque_lpf(m_cfg.lpf_cutoff_hz, m_cfg.ai_sample_rate_hz);
+  int prev_quad_state = -1;
+  int64_t speed_window_count = 0, speed_window_samples = 0;
+  std::deque<std::pair<int64_t, int64_t>> speed_chunks;
+  double filtered_rpm = 0.0;
   const auto t0 = std::chrono::steady_clock::now();
-  // Both reads must consume the same time-worth of samples per iteration --
-  // the loop's actual cadence is dictated by whichever read blocks longest.
-  // Previously the AI chunk was sized for 20 ms while the DI chunk (and thus
-  // the loop period) was 50 ms, so every iteration left a 30 ms backlog of
-  // unread AI samples; over time that grew until the AI buffer overflowed
-  // (DAQmx error -200279, "not able to keep up with the hardware
-  // acquisition"). Sizing both chunks from the same window fixes the drift.
+  // Consume equal time windows to avoid accumulating an AI or DI backlog.
   const int32 ai_chunk = std::max<int32>(
-      1, static_cast<int32>(m_cfg.ai_sample_rate_hz * m_cfg.speed_window_s));
+      1, static_cast<int32>(m_cfg.ai_sample_rate_hz * m_cfg.publish_period_s));
   const int32 di_chunk = std::max<int32>(
-      1, static_cast<int32>(m_cfg.di_sample_rate_hz * m_cfg.speed_window_s));
+      1, static_cast<int32>(m_cfg.di_sample_rate_hz * m_cfg.publish_period_s));
   std::vector<float64> ai_buf(static_cast<std::size_t>(ai_chunk));
   std::vector<uInt8> di_buf(static_cast<std::size_t>(di_chunk) * 2);
   const double counts_per_rev = m_cfg.encoder_ppr * 4.0;
   constexpr double kSpeedLpfCutoffHz = 2.0; // matches the Python reference.
+  const auto window_samples =
+      static_cast<int64_t>(m_cfg.di_sample_rate_hz * m_cfg.speed_window_s);
+  const double chunk_time_s = di_chunk / m_cfg.di_sample_rate_hz;
+  const double rc = 1.0 / (2.0 * M_PI * kSpeedLpfCutoffHz);
+  const double alpha = chunk_time_s / (rc + chunk_time_s);
+  uint64_t analog_samples = 0;
 
   while (!m_stop_requested.load()) {
     int32 ai_read = 0;
     if (DAQmxReadAnalogF64(m_impl->ai_task, ai_chunk, 1.0,
                            DAQmx_Val_GroupByChannel, ai_buf.data(),
                            static_cast<uInt32>(ai_buf.size()), &ai_read,
-                           nullptr)) {
+                           nullptr) < 0) {
       std::lock_guard<std::mutex> lk(m_mutex);
       m_last_error = "analog read failed: " + last_daqmx_error();
       break;
     }
-
-    double last_raw_v = 0.0;
-    double last_filtered_v = 0.0;
-    for (int32 i = 0; i < ai_read; ++i) {
-      last_raw_v = ai_buf[static_cast<std::size_t>(i)];
-      last_filtered_v = m_impl->torque_lpf.process(last_raw_v);
+    if (ai_read != ai_chunk) {
+      std::lock_guard<std::mutex> lk(m_mutex);
+      m_last_error = "incomplete analog block: expected " +
+                     std::to_string(ai_chunk) + ", received " +
+                     std::to_string(ai_read);
+      break;
     }
+
+    double last_filtered_v = 0.0;
+    for (const auto voltage : ai_buf)
+      last_filtered_v = torque_lpf.process(voltage);
 
     int32 di_read = 0;
     int32 bytes_per_sample = 0;
     if (DAQmxReadDigitalLines(m_impl->di_task, di_chunk, 1.0,
                               DAQmx_Val_GroupByChannel, di_buf.data(),
                               static_cast<uInt32>(di_buf.size()), &di_read,
-                              &bytes_per_sample, nullptr)) {
+                              &bytes_per_sample, nullptr) < 0) {
       std::lock_guard<std::mutex> lk(m_mutex);
       m_last_error = "digital read failed: " + last_daqmx_error();
       break;
     }
+    if (di_read != di_chunk) {
+      std::lock_guard<std::mutex> lk(m_mutex);
+      m_last_error = "incomplete encoder block: expected " +
+                     std::to_string(di_chunk) + ", received " +
+                     std::to_string(di_read);
+      break;
+    }
 
+    int64_t chunk_count = 0;
     for (int32 i = 0; i < di_read; ++i) {
       const int a = di_buf[static_cast<std::size_t>(i)] ? 1 : 0;
       const int b = di_buf[static_cast<std::size_t>(di_read + i)] ? 1 : 0;
       const int state = (a << 1) | b;
-      if (m_impl->prev_quad_state >= 0 && state != m_impl->prev_quad_state) {
-        m_impl->speed_window_count +=
-            kQuadratureTransitions[static_cast<std::size_t>(
-                (m_impl->prev_quad_state << 2) | state)];
+      if (prev_quad_state >= 0) {
+        chunk_count += kQuadratureTransitions[static_cast<std::size_t>(
+            (prev_quad_state << 2) | state)];
       }
-      m_impl->prev_quad_state = state;
-      ++m_impl->speed_window_samples;
+      prev_quad_state = state;
+    }
+    speed_chunks.emplace_back(chunk_count, di_read);
+    speed_window_count += chunk_count;
+    speed_window_samples += di_read;
+    while (speed_chunks.size() > 1 &&
+           speed_window_samples - speed_chunks.front().second >=
+               window_samples) {
+      speed_window_count -= speed_chunks.front().first;
+      speed_window_samples -= speed_chunks.front().second;
+      speed_chunks.pop_front();
     }
 
     const double window_time_s =
-        static_cast<double>(m_impl->speed_window_samples) /
-        m_cfg.di_sample_rate_hz;
-    if (window_time_s > 0.0) {
-      const double raw_rpm = static_cast<double>(m_impl->speed_window_count) /
-                             counts_per_rev / window_time_s * 60.0;
-      const double rc = 1.0 / (2.0 * M_PI * kSpeedLpfCutoffHz);
-      const double alpha = window_time_s / (rc + window_time_s);
-      m_impl->filtered_rpm += alpha * (raw_rpm - m_impl->filtered_rpm);
-      m_impl->speed_window_count = 0;
-      m_impl->speed_window_samples = 0;
-    }
+        static_cast<double>(speed_window_samples) / m_cfg.di_sample_rate_hz;
+    const double raw_rpm = static_cast<double>(speed_window_count) /
+                           counts_per_rev / window_time_s * 60.0;
+    filtered_rpm += alpha * (raw_rpm - filtered_rpm);
 
     Sample s;
-    s.t_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0)
-               .count();
+    analog_samples += ai_read;
+    s.sample_index = analog_samples;
+    s.t_s = static_cast<double>(analog_samples) / m_cfg.ai_sample_rate_hz;
+    s.delivery_time_s =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - t0)
+            .count();
     const double sign = m_cfg.invert_torque_sign ? -1.0 : 1.0;
-    s.torque_nm = sign * last_raw_v / m_cfg.torque_sensitivity_v_per_nm;
+    s.torque_nm = sign * ai_buf.back() / m_cfg.torque_sensitivity_v_per_nm;
     s.filtered_torque_nm =
         sign * last_filtered_v / m_cfg.torque_sensitivity_v_per_nm;
-    s.speed_rpm = m_impl->filtered_rpm;
+    s.speed_rpm = filtered_rpm;
 
-    std::lock_guard<std::mutex> lk(m_mutex);
-    s.torque_nm -= m_tare_offset_nm;
-    s.filtered_torque_nm -= m_tare_offset_nm;
-    m_latest = s;
+    {
+      std::lock_guard<std::mutex> lk(m_mutex);
+      s.torque_nm -= m_tare_offset_nm;
+      s.filtered_torque_nm -= m_tare_offset_nm;
+      m_latest = s;
+    }
+    m_capture.push(s);
   }
   m_running.store(false);
 }

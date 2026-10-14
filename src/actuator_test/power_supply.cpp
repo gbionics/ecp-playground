@@ -112,7 +112,7 @@ PowerSupplyReader::~PowerSupplyReader() {
 
 void PowerSupplyReader::start() {
   if (!m_thread.joinable()) {
-    setStatus("Connecting to ITECH...");
+    setProgress(State::Connecting, "Connecting to ITECH...");
     m_thread = std::thread([this] { run(); });
   }
 }
@@ -126,14 +126,19 @@ std::vector<PowerSupplyReader::Sample> PowerSupplyReader::takeSamples() {
   return std::move(m_samples);
 }
 
-std::string PowerSupplyReader::status() const {
+std::string PowerSupplyReader::status() const { return progress().message; }
+
+PowerSupplyReader::Progress PowerSupplyReader::progress() const {
   std::lock_guard lock(m_mutex);
-  return m_status;
+  return m_progress;
 }
 
-void PowerSupplyReader::setStatus(std::string status) {
+void PowerSupplyReader::setProgress(State state, std::string message) {
   std::lock_guard lock(m_mutex);
-  m_status = std::move(status);
+  m_progress.state = state;
+  m_progress.message = std::move(message);
+  if (state == State::Acquiring)
+    m_progress.acquisition_started = true;
 }
 
 void PowerSupplyReader::sleepFor(double seconds) const {
@@ -282,12 +287,13 @@ void PowerSupplyReader::run() {
     command("TRIG:ELOG:SOUR MANUAL");
     command("INIT:ELOG");
     elog_active = true;
-    setStatus("ELOG: waiting for trigger readiness...");
+    setProgress(State::Arming, "ELOG: waiting for trigger readiness...");
     const auto arm_deadline = deadlineAfter(5.0);
     while (!m_stop_requested) {
       const auto state = query("ELOG:STAT?", m_cfg.timeout_s);
       if (state == "wait trigger") {
         command("TRIG:ELOG");
+        setProgress(State::Acquiring, "ELOG: acquiring internally...");
         break;
       }
       if (state != "idle") {
@@ -298,7 +304,6 @@ void PowerSupplyReader::run() {
       }
       sleepFor(0.05);
     }
-    setStatus("ELOG: acquiring internally...");
     const auto acquisition_deadline = deadlineAfter(m_cfg.duration_s + 5.0);
     while (!m_stop_requested) {
       const auto state = query("ELOG:STAT?", m_cfg.timeout_s);
@@ -325,7 +330,7 @@ void PowerSupplyReader::run() {
       }
     }
     elog_active = false;
-    setStatus("ELOG: downloading ASCII data...");
+    setProgress(State::Downloading, "ELOG: downloading ASCII data...");
     auto samples =
         parseSamples(query("FETC:ELOG:ARR:DATA?", m_cfg.download_timeout_s),
                      m_cfg.sample_period_s);
@@ -333,15 +338,21 @@ void PowerSupplyReader::run() {
     std::string status =
         m_interrupted ? "ELOG interrupted: " : "ELOG complete: ";
     status += std::to_string(samples.size()) + " samples";
-    if (!m_interrupted && std::fabs(samples.size() - expected) > 1.0) {
+    const bool count_mismatch =
+        !m_interrupted && std::fabs(samples.size() - expected) > 1.0;
+    if (count_mismatch) {
       status +=
           " (WARNING: expected approximately " + scpiNumber(expected) + ")";
     }
     if (samples.empty()) {
       status += " (WARNING: empty buffer)";
     }
+    const State outcome =
+        m_interrupted ? State::Interrupted
+                      : (count_mismatch || samples.empty() ? State::Incomplete
+                                                           : State::Complete);
     m_samples = std::move(samples);
-    setStatus(std::move(status));
+    setProgress(outcome, std::move(status));
   } catch (const std::exception &error) {
     std::string status =
         "ELOG error: " + std::string(error.what()) +
@@ -355,7 +366,7 @@ void PowerSupplyReader::run() {
         status += " Abort failed: " + std::string(abort_error.what());
       }
     }
-    setStatus(std::move(status));
+    setProgress(State::Failed, std::move(status));
   }
   closeSocket();
   m_finished = true;

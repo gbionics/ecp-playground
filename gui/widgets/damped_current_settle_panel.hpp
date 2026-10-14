@@ -35,6 +35,7 @@ public:
   void setExternalDaqReader(
       std::shared_ptr<actuator_test::ExternalDaqReader> external_daq);
   void appendTelemetry(const TelemetryFrame &frame);
+  bool isRunning() const { return m_running; }
 
 signals:
   void dampedCurrentRequested(std::size_t joint, double amplitude_a,
@@ -49,7 +50,7 @@ private:
   void start();
   void stop(const QString &reason);
   void tare();
-  void updateStartEnabled();
+  void updateControls();
   std::size_t selectedJoint() const;
 
   std::vector<JointInfo> m_joints;
@@ -77,8 +78,7 @@ private:
   int m_series_external_raw_torque = -1;
   bool m_scrub_updating = false;
   bool m_running = false;
-  bool m_have_t0 = false;
-  double m_t0_s = 0.0;
+  std::optional<double> m_t0_s;
   std::size_t m_active_joint = 0;
   double m_sum_torque_nm = 0.0;
   double m_sum_sq_torque_nm = 0.0;

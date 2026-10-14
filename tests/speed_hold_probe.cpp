@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 #include "actuator_test/speed_hold.hpp"
+#include "actuator_test/sample_buffer.hpp"
 
 #include <cmath>
 #include <cstdlib>
@@ -22,12 +23,37 @@ void require(bool passed, const char *message) {
 } // namespace
 
 int main() {
+  actuator_test::SampleBuffer<int> buffer(2);
+  std::vector<int> captured;
+  buffer.push(99);
+  buffer.start();
+  buffer.push(1);
+  buffer.push(2);
+  buffer.push(3);
+  require(buffer.drain(captured) == 1 && captured == std::vector<int>({1, 2}),
+          "buffer overflow not counted or samples reordered");
+  buffer.push(4);
+  require(buffer.drain(captured, true) == 1 && captured.back() == 4,
+          "buffer drain lost sample or overflow count");
+  buffer.push(5);
+  buffer.drain(captured);
+  require(captured.size() == 3, "stopped buffer kept capturing");
+  buffer.start();
+  captured.clear();
+  buffer.push(6);
+  require(buffer.drain(captured, true) == 0 &&
+              captured == std::vector<int>({6}),
+          "buffer restart retained samples or overflow");
   require(valid_speed_hold_parameters(360.0, 1.0, 19, 50),
           "valid positive speed rejected");
   require(valid_speed_hold_parameters(-360.0, 1.0, 19, 50),
           "valid negative speed rejected");
   require(!valid_speed_hold_parameters(0.0, 1.0, 19, 50),
           "zero speed accepted");
+  require(valid_speed_hold_parameters(0.0, 1.0, 19, 50, 0, true),
+          "zero speed rejected for a live change");
+  require(!valid_speed_hold_parameters(0.0, 0.0, 19, 50, 0, true),
+          "zero ramp accepted for zero speed");
   require(!valid_speed_hold_parameters(360.0, 0.0, 19, 50),
           "zero ramp accepted");
   require(!valid_speed_hold_parameters(360.0, -1.0, 19, 50),
@@ -113,6 +139,40 @@ int main() {
           "steady-speed position integration incorrect");
   require(ref.position_safe(1234 + 786432, 524288, 0.001),
           "normal position reference considered unsafe");
+
+  ref.reset(360.0, 1.0, 19, 0, true);
+  ref.step(1.0);
+  ref.retarget(-360.0, 1.0);
+  require(ref.target_deg_s() == -360.0, "retarget did not update target");
+  require(ref.step(0.5) == 0, "retarget ramp does not start from velocity");
+  require(ref.position_counts() == 262144 + 131072,
+          "retarget ramp position integration incorrect");
+  require(ref.step(0.5) == -524288, "retarget did not reach new target");
+  require(ref.position_counts() == 262144,
+          "retarget reversal position integration incorrect");
+  ref.step(1.0);
+  require(ref.position_counts() == -262144,
+          "post-retarget hold integration incorrect");
+  for (double speed : {360.0, -360.0}) {
+    ref.reset(speed, 1.0, 19, 0, true);
+    ref.step(1.0);
+    const double position = ref.position_counts();
+    ref.retarget(0, 1.0);
+    require(ref.position_counts() == position &&
+                ref.velocity_deg_s() == speed,
+            "zero retarget reset position or velocity");
+    ref.step(0.5);
+    require(ref.velocity_deg_s() == speed / 2,
+            "zero ramp midpoint incorrect");
+    require(ref.step(0.75) == 0, "zero ramp did not reach zero");
+    const double stopped_position = ref.position_counts();
+    require(stopped_position == position + speed / 360 * 524288 * 0.5,
+            "zero ramp integrated position incorrectly");
+    ref.step(10);
+    require(ref.position_counts() == stopped_position &&
+                ref.velocity_deg_s() == 0,
+            "zero hold drifted");
+  }
 
   ref.reset(-360.0, 1.0, 19, -1234, true);
   ref.step(1.5);

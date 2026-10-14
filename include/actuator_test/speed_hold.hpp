@@ -13,8 +13,10 @@ namespace actuator_test {
 inline bool valid_speed_hold_parameters(double velocity_deg_s,
                                         double ramp_time_s, int encoder_bits,
                                         int32_t damping,
-                                        int32_t stiffness = 0) noexcept {
-  if (!std::isfinite(velocity_deg_s) || velocity_deg_s == 0.0 ||
+                                        int32_t stiffness = 0,
+                                        bool allow_zero = false) noexcept {
+  if (!std::isfinite(velocity_deg_s) ||
+      (velocity_deg_s == 0.0 && !allow_zero) ||
       !std::isfinite(ramp_time_s) || ramp_time_s <= 0.0 || encoder_bits < 1 ||
       encoder_bits > 31 || damping < 0 || stiffness < 0 ||
       (damping == 0 && stiffness == 0)) {
@@ -22,7 +24,7 @@ inline bool valid_speed_hold_parameters(double velocity_deg_s,
   }
   const double counts_per_s =
       velocity_deg_s / 360.0 * static_cast<double>(int64_t{1} << encoder_bits);
-  return std::fabs(counts_per_s) >= 0.5 &&
+  return (velocity_deg_s == 0.0 || std::fabs(counts_per_s) >= 0.5) &&
          std::fabs(counts_per_s) <
              static_cast<double>(std::numeric_limits<int32_t>::max()) - 0.5;
 }
@@ -52,16 +54,26 @@ public:
     m_ramp_time = ramp_time_s;
     m_elapsed = 0.0;
     m_velocity = 0.0;
+    m_start = 0.0;
     m_counts_per_deg = static_cast<double>(int64_t{1} << encoder_bits) / 360.0;
     m_position = initial_position;
     m_track_position = track_position;
+  }
+
+  /// Ramp linearly from the current reference velocity to a new target,
+  /// keeping the integrated position reference continuous.
+  void retarget(double velocity_deg_s, double ramp_time_s) noexcept {
+    m_start = m_velocity;
+    m_target = velocity_deg_s;
+    m_ramp_time = ramp_time_s;
+    m_elapsed = 0.0;
   }
 
   int32_t step(double dt_s) noexcept {
     const double ramp_dt = std::min(dt_s, m_ramp_time - m_elapsed);
     const double previous_velocity = m_velocity;
     m_elapsed += ramp_dt;
-    m_velocity = m_target * (m_elapsed / m_ramp_time);
+    m_velocity = m_start + (m_target - m_start) * (m_elapsed / m_ramp_time);
     if (m_track_position) {
       m_position +=
           m_counts_per_deg * (0.5 * (previous_velocity + m_velocity) * ramp_dt +
@@ -96,6 +108,7 @@ private:
   double m_ramp_time = 1.0;
   double m_elapsed = 0.0;
   double m_velocity = 0.0;
+  double m_start = 0.0;
   double m_counts_per_deg = 1.0;
   double m_position = 0.0;
   bool m_track_position = false;

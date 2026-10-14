@@ -18,7 +18,6 @@
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QPushButton>
-#include <QSaveFile>
 #include <QSignalBlocker>
 #include <QSpinBox>
 #include <QTextStream>
@@ -28,6 +27,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <pwd.h>
 
 namespace actuator_test::gui {
 namespace {
@@ -40,21 +40,41 @@ bool validSample(const ExternalDaqReader::Sample &s) {
 }
 } // namespace
 
+QString NoLoadTestDialog::defaultResultRoot() {
+  const QString env = qEnvironmentVariable("ACTUATOR_TEST_ANALYSIS_DIR");
+  if (!env.isEmpty())
+    return env;
+  // Under sudo, keep saving into the invoking user's home rather than /root.
+  QString home;
+  if (const QByteArray sudo_user = qgetenv("SUDO_USER"); !sudo_user.isEmpty())
+    if (const passwd *pw = getpwnam(sudo_user.constData()))
+      home = QString::fromLocal8Bit(pw->pw_dir);
+  if (home.isEmpty())
+    home = QDir::homePath();
+  return QDir(home).filePath(
+      QStringLiteral("Documents/test-actuator-analysis"));
+}
+
 NoLoadTestDialog::NoLoadTestDialog(QWidget *parent, QString result_root)
     : QDialog(parent), m_result_root(std::move(result_root)) {
   setWindowTitle(tr("No-load speed test"));
   resize(1250, 760);
   m_clock.start();
   auto *layout = new QVBoxLayout(this);
-  auto *instructions = new QLabel(tr(
-      "DUT: PVT speed hold with temporary KP/KD. KP>0 tracks a position "
-      "reference generated from speed; KP=0 uses velocity feedback only. "
-      "Actual speed is "
-      "verified within tolerance. Control the Yaskawa externally; this dialog "
-      "does not command it.\nDAQ is mandatory. Torque must remain in the "
-      "symmetric no-load band and both speeds within tolerance before "
-      "capture.\n"
-      "Completion does NOT stop rotation. Press Stop to release the DUT."));
+  auto *instructions = new QLabel(
+      tr("Acquisition does not require Start speed: the DUT may be controlled "
+         "in current elsewhere while the load holds speed.\n"
+         "Optional DUT PVT speed hold with temporary KP/KD. KP>0 tracks a "
+         "position "
+         "reference generated from speed; KP=0 uses velocity feedback only. "
+         "Control the Yaskawa externally; this dialog "
+         "does not command it.\nDAQ is mandatory. The "
+         "symmetric no-load torque band and torsiometer speed tolerance are "
+         "advisory "
+         "only. Start acquisition manually, even outside the band.\n"
+         "Completion does not change DUT speed. Set 0 rpm and Apply speed or "
+         "use Soft stop to decelerate. Emergency stop releases the DUT "
+         "immediately."));
   instructions->setWordWrap(true);
   layout->addWidget(instructions);
   m_settings = new QGroupBox(tr("Settings"));
@@ -137,23 +157,113 @@ NoLoadTestDialog::NoLoadTestDialog(QWidget *parent, QString result_root)
   // while busy, but Stop must remain usable.
   auto *left = new QVBoxLayout;
   left->addWidget(m_settings);
+  m_current_controls = new QGroupBox(tr("Manual DUT current"));
+  auto *current_form = new QFormLayout(m_current_controls);
+  m_current = new QDoubleSpinBox;
+  m_current->setDecimals(6);
+  m_current->setSuffix(tr(" A"));
+  m_current->setKeyboardTracking(false);
+  m_current->setToolTip(
+      tr("Changes are applied immediately with the current ramp, including "
+         "during acquisition. Signed current, limited to rated current; "
+         "KP/KD are disabled by current control. This does not command the "
+         "load."));
+  auto *current_row = new QHBoxLayout;
+  m_current_minus = new QPushButton(QStringLiteral("-"));
+  m_current_plus = new QPushButton(QStringLiteral("+"));
+  m_current_minus->setAccessibleName(tr("Decrease DUT current"));
+  m_current_plus->setAccessibleName(tr("Increase DUT current"));
+  current_row->addWidget(m_current_minus);
+  current_row->addWidget(m_current, 1);
+  current_row->addWidget(m_current_plus);
+  current_form->addRow(tr("Target current"), current_row);
+  m_current_step = new QDoubleSpinBox;
+  m_current_step->setDecimals(6);
+  m_current_step->setRange(0.001, 1);
+  m_current_step->setValue(0.01);
+  m_current_step->setSuffix(tr(" A"));
+  current_form->addRow(tr("Adjustment step"), m_current_step);
+  m_current->setSingleStep(m_current_step->value());
+  m_current_ramp = new QDoubleSpinBox;
+  m_current_ramp->setRange(0.01, 60);
+  m_current_ramp->setValue(1);
+  m_current_ramp->setSuffix(tr(" s"));
+  current_form->addRow(tr("Current ramp"), m_current_ramp);
+  left->addWidget(m_current_controls);
+  m_current_readout = new QLabel;
+  m_current_readout->setWordWrap(true);
+  left->addWidget(m_current_readout);
+  connect(m_current_step, &QDoubleSpinBox::valueChanged, this,
+          [this](double value) {
+            const double quantum = m_current->maximum() / 1000.0;
+            if (quantum <= 0)
+              return;
+            const double step =
+                std::max(1.0, std::round(value / quantum)) * quantum;
+            const QSignalBlocker blocker(m_current_step);
+            m_current_step->setValue(step);
+            m_current->setSingleStep(step);
+          });
+  connect(m_current_minus, &QPushButton::clicked, m_current,
+          &QDoubleSpinBox::stepDown);
+  connect(m_current_plus, &QPushButton::clicked, m_current,
+          &QDoubleSpinBox::stepUp);
+  connect(m_current, &QDoubleSpinBox::valueChanged, this,
+          [this] { applyCurrent(); });
+  auto *live_speed = new QGroupBox(tr("Change speed while running"));
+  auto *live_row = new QHBoxLayout(live_speed);
+  m_live_rpm = new QDoubleSpinBox;
+  m_live_rpm->setRange(-10000, 10000);
+  m_live_rpm->setDecimals(3);
+  m_live_rpm->setSuffix(tr(" rpm"));
+  m_live_rpm->setToolTip(
+      tr("New DUT speed, reached with the configured speed ramp. Changing "
+         "speed restarts the dwell; during an acquisition it aborts it "
+         "(partial data is saved) while the DUT keeps rotating."));
+  m_apply_rpm = new QPushButton(tr("Apply speed"));
+  live_row->addWidget(m_live_rpm, 1);
+  live_row->addWidget(m_apply_rpm);
+  left->addWidget(live_speed);
   m_live = new QLabel(tr("Waiting for fresh external DAQ samples."));
+  m_band_status = new QLabel(tr("Torsiometer band: waiting for data."));
   m_status = new QLabel(tr("Idle"));
   m_saved = new QLabel;
-  for (auto *label : {m_live, m_status, m_saved}) {
+  for (auto *label : {m_live, m_band_status, m_status, m_saved}) {
     label->setWordWrap(true);
     label->setTextInteractionFlags(Qt::TextSelectableByMouse);
     left->addWidget(label);
   }
   auto *buttons = new QGridLayout;
-  m_start = new QPushButton(tr("Start speed / arm"));
+  m_start = new QPushButton(tr("Start speed"));
+  m_acquire = new QPushButton(tr("Start acquisition"));
+  m_acquire->setToolTip(
+      tr("Start DC supply ELOG and sensor acquisition manually. The "
+         "torsiometer band and dwell are advisory, not start conditions."));
   m_rearm = new QPushButton(tr("Rearm acquisition"));
-  m_stop = new QPushButton(tr("Stop"));
+  m_stop = new QPushButton(tr("Emergency stop"));
+  m_stop->setStyleSheet(
+      QStringLiteral("QPushButton { background-color: #b71c1c; color: white; "
+                     "font-weight: bold; } "
+                     "QPushButton:hover { background-color: #d32f2f; } "
+                     "QPushButton:pressed { background-color: #8e1515; } "
+                     "QPushButton:disabled { background-color: #633333; "
+                     "color: #bbbbbb; }"));
+  m_stop->setToolTip(
+      tr("Immediately release the DUT and cancel any unfinished acquisition, "
+         "without a deceleration ramp. Software stop only: does not command "
+         "the external Yaskawa or guarantee a physical emergency stop."));
+  m_soft_stop = new QPushButton(tr("Soft stop"));
+  m_soft_stop->setToolTip(
+      tr("Ramp to 0 rpm using Speed ramp and keep PVT control active. "
+         "An unfinished acquisition is saved as partial data. This is not an "
+         "emergency stop and does not control the Yaskawa."));
   m_export = new QPushButton(tr("Export CSV copies..."));
   buttons->addWidget(m_start, 0, 0);
-  buttons->addWidget(m_stop, 0, 1);
+  buttons->addWidget(m_soft_stop, 0, 1);
   buttons->addWidget(m_rearm, 1, 0);
   buttons->addWidget(m_export, 1, 1);
+  buttons->addWidget(m_acquire, 2, 0, 1, 2);
+  buttons->addWidget(m_stop, 3, 0, 1, 2);
   left->addLayout(buttons);
   left->addStretch(1);
 
@@ -162,9 +272,21 @@ NoLoadTestDialog::NoLoadTestDialog(QWidget *parent, QString result_root)
   body->addLayout(plots, 3);
   layout->addLayout(body, 1);
   connect(m_start, &QPushButton::clicked, this, &NoLoadTestDialog::start);
-  connect(m_stop, &QPushButton::clicked, this,
-          [this] { stopTest(tr("Stopped by user")); });
+  connect(m_acquire, &QPushButton::clicked, this,
+          &NoLoadTestDialog::startAcquisition);
+  connect(m_stop, &QPushButton::clicked, this, [this] {
+    const bool owns_motion = m_running;
+    stopTest(tr("Emergency stop requested by user"));
+    if (!owns_motion)
+      emit emergencyStopRequested();
+  });
+  connect(m_soft_stop, &QPushButton::clicked, this,
+          &NoLoadTestDialog::softStop);
   connect(m_rearm, &QPushButton::clicked, this, &NoLoadTestDialog::rearm);
+  connect(m_apply_rpm, &QPushButton::clicked, this,
+          &NoLoadTestDialog::applySpeed);
+  connect(m_live_rpm, &QDoubleSpinBox::valueChanged, this,
+          [this] { updateControls(); });
   connect(m_export, &QPushButton::clicked, this,
           &NoLoadTestDialog::exportResults);
   connect(m_rpm, &QDoubleSpinBox::valueChanged, this,
@@ -197,6 +319,27 @@ void NoLoadTestDialog::loadJointGains() {
   const QSignalBlocker kp_blocker(m_kp), kd_blocker(m_kd);
   m_kp->setValue(valid ? m_joints[index].pvt_kp : 0);
   m_kd->setValue(valid ? m_joints[index].pvt_kd : 0);
+  const QSignalBlocker current_blocker(m_current);
+  const double rated = valid && std::isfinite(m_joints[index].rated_current_a)
+                           ? std::max(0.0, m_joints[index].rated_current_a)
+                           : 0.0;
+  m_current->setRange(-rated, rated);
+  const QSignalBlocker step_blocker(m_current_step);
+  const double quantum = rated / 1000.0;
+  m_current_step->setRange(quantum, rated);
+  m_current_step->setSingleStep(quantum);
+  m_current_step->setValue(quantum);
+  m_current->setSingleStep(quantum);
+  m_current_step->setToolTip(
+      tr("Minimum step: 1 permille of rated current (%1 A). "
+         "Steps are rounded to integer multiples of this resolution.")
+          .arg(quantum, 0, 'f', 6));
+  m_current->setValue(
+      valid && static_cast<std::size_t>(index) < m_frame.joints.size() &&
+              quantum > 0
+          ? std::round(m_frame.joints[index].commanded_current_a / quantum) *
+                quantum
+          : 0);
   if (valid && (m_joints[index].pvt_kp < 0 || m_joints[index].pvt_kd < 0))
     m_status->setText(
         tr("Configured PVT gains contain negative values. Enter non-negative "
@@ -251,23 +394,114 @@ void NoLoadTestDialog::setAvailable(bool available) {
   updateControls();
 }
 
+void NoLoadTestDialog::setDriveCapture(std::shared_ptr<DriveCapture> capture,
+                                       double period_s) {
+  if (isBusy())
+    stopTest(tr("Drive capture source changed"));
+  m_drive_capture = std::move(capture);
+  m_drive_period_s = period_s;
+  updateControls();
+}
+
 void NoLoadTestDialog::updateControls() {
+  const double wall = now();
+  const int index = m_joint->currentIndex();
+  const bool telemetry_joint_present =
+      index >= 0 && static_cast<std::size_t>(index) < m_frame.joints.size();
+  const auto *joint =
+      telemetry_joint_present ? &m_frame.joints[index] : nullptr;
+  const auto *info =
+      index >= 0 && static_cast<std::size_t>(index) < m_joints.size()
+          ? &m_joints[index]
+          : nullptr;
   const bool fresh = m_daq && m_daq->running() && m_last_fresh_wall >= 0 &&
-                     now() - m_last_fresh_wall <= freshness_s;
-  const bool configured = m_joint->currentIndex() >= 0 && m_rpm->value() != 0 &&
-                          !m_host->text().trimmed().isEmpty() &&
-                          m_period->value() <= m_duration->value() &&
-                          (m_kp->value() > 0 || m_kd->value() > 0);
+                     wall - m_last_fresh_wall <= freshness_s;
+  const bool telemetry_fresh = wall - m_last_frame_wall <= freshness_s;
+  const bool controller_ready =
+      m_frame.state != ControllerState::Disconnected &&
+      m_frame.state != ControllerState::Faulted;
+  const bool supply_configured = !m_host->text().trimmed().isEmpty() &&
+                                 m_period->value() <= m_duration->value();
+  const bool capture_idle = !m_dataset_pending && !m_supply;
+  const bool drive_rate_valid =
+      m_drive_capture && std::fabs(m_drive_period_s - 0.01) < 1e-9;
+  const bool daq_rate_valid =
+      m_daq && std::fabs(m_daq->publicationPeriodS() - 0.01) < 1e-9;
+  const bool speed_acknowledged = m_motion_ack && !m_speed_change_pending;
+  const bool speed_configured = index >= 0 && m_rpm->value() != 0 &&
+                                (m_kp->value() > 0 || m_kd->value() > 0);
+  if (!fresh)
+    m_band_status->setText(tr("Torsiometer band: not monitoring."));
   m_settings->setEnabled(!isBusy());
-  m_start->setEnabled(m_available && !isBusy() && fresh && configured &&
+  m_start->setEnabled(m_available && !isBusy() && fresh && supply_configured &&
+                      speed_configured &&
                       m_frame.state == ControllerState::Connected);
+  m_acquire->setEnabled(m_available && capture_idle && joint && !joint->fault &&
+                        controller_ready && supply_configured && fresh &&
+                        telemetry_fresh && (!m_running || speed_acknowledged) &&
+                        drive_rate_valid && daq_rate_valid);
+  if (capture_idle &&
+      (!drive_rate_valid ||
+       (m_daq && std::fabs(m_daq->publicationPeriodS() - 0.01) >= 1e-9)))
+    m_status->setText(tr("Acquisition unavailable: DAQ and drive sources must "
+                         "publish at 100 Hz."));
   m_rearm->setEnabled(m_running && !m_supply && fresh &&
+                      !m_speed_change_pending && m_target_rpm != 0 &&
                       m_phase == Phase::Complete);
-  m_stop->setEnabled(isBusy());
-  m_export->setEnabled(m_valid && !m_supply && !m_dataset_pending &&
-                       (!m_running || m_phase == Phase::Complete));
+  const bool current_ready =
+      joint && info && m_available && fresh && telemetry_fresh && !m_running &&
+      m_frame.state != ControllerState::Faulted &&
+      (m_frame.state == ControllerState::Connected ||
+       (m_frame.state == ControllerState::Jogging &&
+        joint->current_control_active)) &&
+      info->selectable && info->driver_name == "MT_Device" &&
+      info->rated_current_a > 0 &&
+      joint->max_limit_deg > joint->min_limit_deg && !joint->fault &&
+      std::none_of(m_frame.joints.begin(), m_frame.joints.end(),
+                   [](const auto &j) { return j.speed_hold_active; });
+  m_current_controls->setEnabled(current_ready);
+  m_current_minus->setEnabled(m_current->value() > m_current->minimum());
+  m_current_plus->setEnabled(m_current->value() < m_current->maximum());
+  if (joint && info)
+    m_current_readout->setText(
+        tr("Drive commanded: %1 A | reported: %2 A | rated: %3 A%4")
+            .arg(joint->commanded_current_a, 0, 'f', 6)
+            .arg(joint->current_a, 0, 'f', 6)
+            .arg(info->rated_current_a, 0, 'f', 3)
+            .arg(current_ready ? QString()
+                               : tr("\nCurrent adjustment unavailable: "
+                                    "requires an idle/current "
+                                    "MyActuator with travel limits, fresh data "
+                                    "and no conflicting test.")));
+  else
+    m_current_readout->setText(tr("Current adjustment: no DUT selected."));
+  m_stop->setEnabled(isBusy() ||
+                     (m_frame.state != ControllerState::Disconnected));
+  m_soft_stop->setEnabled(m_running && speed_acknowledged && m_target_rpm != 0);
+  if (!m_running && current_ready && joint->current_control_active)
+    m_soft_stop->setEnabled(true);
+  m_live_rpm->setEnabled(m_running);
+  m_apply_rpm->setEnabled(m_running && speed_acknowledged &&
+                          m_live_rpm->value() != m_target_rpm);
+  m_export->setEnabled(
+      (!m_sensor_samples.empty() || !m_supply_samples.empty() ||
+       !m_drive_samples.empty()) &&
+      capture_idle && (!m_running || m_phase == Phase::Complete));
   if (!m_daq || !m_daq->running())
     m_live->setText(tr("External DAQ unavailable: Start disabled."));
+}
+
+void NoLoadTestDialog::applyCurrent() {
+  updateControls();
+  if (!m_current_controls->isEnabled())
+    return;
+  const double quantum = m_current->maximum() / 1000.0;
+  const double current = std::round(m_current->value() / quantum) * quantum;
+  const QSignalBlocker blocker(m_current);
+  m_current->setValue(current);
+  updateControls();
+  emit currentRampRequested(static_cast<std::size_t>(m_joint->currentIndex()),
+                            current, m_current_ramp->value());
 }
 
 void NoLoadTestDialog::start() {
@@ -288,6 +522,9 @@ void NoLoadTestDialog::start() {
   if (!m_start->isEnabled())
     return;
   m_active_joint = static_cast<std::size_t>(m_joint->currentIndex());
+  m_target_rpm = m_previous_rpm = m_rpm->value();
+  m_speed_change_pending = false;
+  m_live_rpm->setValue(m_target_rpm);
   m_running = true;
   m_motion_ack = false;
   m_start_wall = now();
@@ -296,9 +533,108 @@ void NoLoadTestDialog::start() {
   m_status->setText(tr("Waiting for worker speed-hold acknowledgement..."));
   updateControls();
   emit busyChanged();
-  emit speedHoldRequested(m_active_joint, m_rpm->value() * 6.0, m_ramp->value(),
+  emit speedHoldRequested(m_active_joint, m_target_rpm * 6.0, m_ramp->value(),
                           m_continuous->isChecked(), false, m_kp->value(),
                           m_kd->value());
+}
+
+void NoLoadTestDialog::applySpeed() {
+  updateControls();
+  if (!m_apply_rpm->isEnabled())
+    return;
+  const double rpm = m_live_rpm->value();
+  if (m_dataset_pending)
+    abortAcquisition(tr("Speed changed during acquisition"));
+  else if (m_phase == Phase::Dwell)
+    m_dwell_start = -1;
+  commandSpeed(rpm);
+  if (m_phase != Phase::Complete)
+    m_status->setText(
+        tr("Speed changed to %1 rpm; dwell restarted.").arg(rpm, 0, 'f', 3));
+  updateControls();
+}
+
+bool NoLoadTestDialog::inBand(const ExternalDaqReader::Sample &sample) const {
+  return validSample(sample) && !m_speed_change_pending &&
+         std::fabs(sample.torque_nm) <= m_band->value() &&
+         std::fabs(sample.speed_rpm -
+                   (m_running ? m_target_rpm : m_rpm->value())) <=
+             m_tolerance->value();
+}
+
+void NoLoadTestDialog::startAcquisition() {
+  // Consume the newest sensor sample and recheck freshness at the click.
+  tick();
+  if (!m_acquire->isEnabled())
+    return;
+  if (!m_running) {
+    m_active_joint = static_cast<std::size_t>(m_joint->currentIndex());
+    m_target_rpm = m_rpm->value();
+  }
+  m_sensor_samples.clear();
+  m_drive_samples.clear();
+  m_daq_dropped = m_drive_dropped = 0;
+  m_drive_late_intervals = 0;
+  m_drive_max_host_interval_s = 0;
+  m_daq->captureBuffer().start();
+  m_drive_capture->start(m_active_joint);
+  beginAcquisition();
+  updateControls();
+}
+
+void NoLoadTestDialog::commandSpeed(double rpm) {
+  m_previous_rpm = m_target_rpm;
+  m_target_rpm = rpm;
+  m_speed_change_pending = true;
+  m_speed_change_wall = now();
+  emit speedHoldRequested(m_active_joint, m_target_rpm * 6.0, m_ramp->value(),
+                          m_continuous->isChecked(), false, m_kp->value(),
+                          m_kd->value());
+  updateControls();
+}
+
+void NoLoadTestDialog::softStop() {
+  updateControls();
+  if (!m_soft_stop->isEnabled())
+    return;
+  if (!m_running) {
+    if (m_dataset_pending)
+      abortAcquisition(tr("Soft stop requested: ramping DUT current to 0 A."));
+    const QSignalBlocker blocker(m_current);
+    m_current->setValue(0);
+    emit currentRampRequested(static_cast<std::size_t>(m_joint->currentIndex()),
+                              0, m_current_ramp->value());
+    m_status->setText(
+        tr("Soft stop requested: ramping DUT current to 0 A. "
+           "The load may continue rotating; coordinate its stop externally."));
+    updateControls();
+    return;
+  }
+  const QString reason = tr("Soft stop requested: commanding a ramp to 0 rpm; "
+                            "PVT control remains active until Emergency stop.");
+  if (m_dataset_pending)
+    abortAcquisition(reason);
+  else {
+    m_phase = Phase::Complete;
+    m_status->setText(reason);
+  }
+  m_dwell_start = -1;
+  commandSpeed(0);
+}
+
+void NoLoadTestDialog::abortAcquisition(const QString &reason) {
+  m_cancelled = true;
+  m_acquisition_complete = false;
+  m_result = reason;
+  drainCapture(true);
+  if (m_supply)
+    m_supply->requestStop();
+  else
+    m_supply_done = true;
+  // Keep rotating; Rearm is required for a new dataset once the download ends.
+  m_phase = Phase::Complete;
+  m_status->setText(reason +
+                    tr("\nCancelling ELOG / downloading partial buffer..."));
 }
 
 void NoLoadTestDialog::rearm() {
@@ -317,9 +653,9 @@ void NoLoadTestDialog::plotTelemetry() {
     return;
   const auto &joint = m_frame.joints[static_cast<std::size_t>(index)];
   const double t = now();
-  m_speed_chart->append(m_series_ref_speed, t,
-                        joint.speed_hold_active ? joint.ref_velocity_deg_s / 6.0
-                                                : 0.0);
+  if (joint.speed_hold_active)
+    m_speed_chart->append(m_series_ref_speed, t,
+                          joint.ref_velocity_deg_s / 6.0);
   m_speed_chart->append(m_series_drive_speed, t, joint.velocity_deg_s / 6.0);
 }
 
@@ -337,8 +673,7 @@ void NoLoadTestDialog::plotPower() {
   m_power_chart->setWindowSeconds(
       std::max(1.0, m_power_chart->dataMaxX() - m_power_chart->dataMinX()));
   m_power_label->setText(
-      tr("Supply power (%1): mean %2 W over %3 samples, %4 s ELOG time.")
-          .arg(m_valid ? tr("VALID") : tr("INVALID"))
+      tr("Supply power: mean %1 W over %2 samples, %3 s ELOG time.")
           .arg(sum / static_cast<double>(m_supply_samples.size()), 0, 'f', 2)
           .arg(m_supply_samples.size())
           .arg(m_power_chart->dataMaxX() - m_power_chart->dataMinX(), 0, 'f',
@@ -352,6 +687,12 @@ void NoLoadTestDialog::appendTelemetry(const TelemetryFrame &frame) {
   m_frame = frame;
   if (new_frame)
     plotTelemetry();
+  if (m_dataset_pending && !m_running &&
+      (frame.state == ControllerState::Faulted ||
+       frame.state == ControllerState::Disconnected ||
+       m_active_joint >= frame.joints.size() ||
+       frame.joints[m_active_joint].fault))
+    stopTest(tr("Controller fault, disconnect or missing joint"));
   if (m_running) {
     if (frame.state == ControllerState::Faulted ||
         frame.state == ControllerState::Disconnected ||
@@ -363,9 +704,14 @@ void NoLoadTestDialog::appendTelemetry(const TelemetryFrame &frame) {
           (!m_continuous->isChecked() && joint.limit_violation)) {
         stopTest(tr("Joint fault or travel limit"));
       } else if (joint.speed_hold_active) {
+        const auto commanded = [&](double rpm) {
+          return std::fabs(joint.speed_hold_target_deg_s - rpm * 6) <= 1e-6;
+        };
+        if (commanded(m_target_rpm))
+          m_speed_change_pending = false;
         if (frame.state != ControllerState::Jogging ||
-            std::fabs(joint.speed_hold_target_deg_s - m_rpm->value() * 6) >
-                1e-6 ||
+            !(commanded(m_target_rpm) ||
+              (m_speed_change_pending && commanded(m_previous_rpm))) ||
             joint.continuous_rotation != m_continuous->isChecked() ||
             joint.speed_hold_kp != m_kp->value() ||
             joint.speed_hold_kd != m_kd->value()) {
@@ -388,28 +734,35 @@ void NoLoadTestDialog::buildMetadata() {
   QTextStream metadata(&m_metadata);
   metadata.setRealNumberPrecision(17);
   metadata << "# session=" << m_session << "\n# joint_index=" << m_active_joint
-           << "\n# target_rpm=" << m_rpm->value()
+           << "\n# target_rpm=" << m_target_rpm << "\n# dut_motion_control="
+           << (m_running ? "dialog PVT speed hold" : "external to this dialog")
            << "\n# pvt_kp=" << m_kp->value() << "\n# pvt_kd=" << m_kd->value()
+           << "\n# dialog_gains_applied=" << (m_running ? 1 : 0)
            << "\n# continuous_rotation=" << (m_continuous->isChecked() ? 1 : 0)
            << "\n# torque_band_nm=" << m_band->value()
            << "\n# speed_tolerance_rpm=" << m_tolerance->value()
+           << "\n# band_check=advisory; torsiometer torque and speed only"
            << "\n# dwell_s=" << m_dwell->value()
            << "\n# acquisition_duration_s=" << m_duration->value()
            << "\n# psu_period_s=" << m_period->value()
            << "\n# psu_host=" << m_host->text().trimmed()
-           << "\n# sensor_interval=observed ELOG acquiring until reader "
-              "finished; includes download latency\n";
+           << "\n# torsiometer_tare_offset_nm="
+           << (m_daq ? m_daq->tareOffsetNm() : 0.0)
+           << "\n# daq_period_s=" << m_daq->publicationPeriodS()
+           << "\n# daq_analog_sample_rate_hz=" << m_daq->analogSampleRateHz()
+           << "\n# drive_period_s=" << m_drive_period_s
+           << "\n# sensor_interval=manual acquisition request until reader "
+              "finished or cancellation; includes PSU start/download latency\n";
   metadata.flush();
 }
 
 void NoLoadTestDialog::beginAcquisition() {
-  m_sensor_samples.clear();
   m_supply_samples.clear();
-  m_valid = false;
+  m_acquisition_complete = false;
+  m_result.clear();
   m_cancelled = false;
-  m_sensor_done = m_supply_done = m_supply_ok = m_interrupted = false;
+  m_supply_done = m_supply_ok = m_interrupted = false;
   m_dataset_pending = true;
-  m_capture_start = -1;
   m_session = QDateTime::currentDateTimeUtc().toString("yyyyMMdd-HHmmss-zzz") +
               "-" + QUuid::createUuid().toString(QUuid::Id128);
   buildMetadata();
@@ -418,14 +771,15 @@ void NoLoadTestDialog::beginAcquisition() {
   m_power_label->setText(tr("Power: acquiring..."));
   m_sensor_path.clear();
   m_supply_path.clear();
+  m_drive_path.clear();
   PowerSupplyConfig config;
   config.host = m_host->text().trimmed().toStdString();
   config.sample_period_s = m_period->value();
   config.duration_s = m_duration->value();
   m_supply = std::make_unique<PowerSupplyReader>(config);
-  m_phase = Phase::SupplyStarting;
+  m_phase = Phase::Capturing;
   m_supply->start();
-  m_status->setText(tr("No-load qualified. Starting finite PSU ELOG..."));
+  m_status->setText(tr("Starting finite PSU ELOG by user request..."));
   emit busyChanged();
 }
 
@@ -433,7 +787,7 @@ void NoLoadTestDialog::tick() {
   const double wall = now();
   if (m_last_fresh_wall < 0 || wall - m_last_fresh_wall > freshness_s)
     resetTorqueMean();
-  if (m_running && m_last_fresh_wall >= 0 &&
+  if ((m_running || m_dataset_pending) && m_last_fresh_wall >= 0 &&
       wall - m_last_fresh_wall > freshness_s)
     stopTest(tr("DAQ polling gap exceeded freshness limit"));
   bool distinct = false;
@@ -460,80 +814,74 @@ void NoLoadTestDialog::tick() {
     m_live->setText(tr("Stale external DAQ samples: mean unavailable."));
   const bool fresh = m_daq && m_daq->running() && m_last_fresh_wall >= 0 &&
                      wall - m_last_fresh_wall <= freshness_s;
-  if (m_running && (!fresh || wall - m_last_frame_wall > freshness_s))
+  if ((m_running || m_dataset_pending) &&
+      (!fresh || wall - m_last_frame_wall > freshness_s))
     stopTest(tr("Stale or invalid DAQ / controller telemetry"));
   if (m_running && !m_motion_ack && wall - m_start_wall > m_ramp->value() + 2)
     stopTest(tr("Speed-hold command was not acknowledged"));
+  if (m_running && m_speed_change_pending &&
+      wall - m_speed_change_wall > m_ramp->value() + 2)
+    stopTest(tr("Speed change was not acknowledged"));
 
   if (m_supply) {
-    const QString status = QString::fromStdString(m_supply->status());
+    const auto progress = m_supply->progress();
+    const QString status = QString::fromStdString(progress.message);
     if (!m_cancelled)
       m_status->setText(status);
-    if (m_phase == Phase::SupplyStarting &&
-        status == QStringLiteral("ELOG: acquiring internally...")) {
-      m_phase = Phase::Acquiring;
-      m_capture_start = wall;
-    }
     if (m_supply->finished()) {
+      const auto outcome = m_supply->progress();
+      const QString result = QString::fromStdString(outcome.message);
       m_interrupted = m_supply->interrupted();
       m_supply_samples = m_supply->takeSamples();
-      m_supply_ok =
-          !m_interrupted && !m_supply_samples.empty() &&
-          status.startsWith(QStringLiteral("ELOG complete:")) &&
-          !status.contains(QStringLiteral("WARNING:")) &&
-          !status.contains(QStringLiteral("error:"), Qt::CaseInsensitive);
+      m_supply_ok = !m_interrupted && !m_supply_samples.empty() &&
+                    outcome.state == PowerSupplyReader::State::Complete;
       m_supply.reset();
       m_supply_done = true;
       if (!m_supply_ok && !m_cancelled)
         stopTest(
-            tr("PSU failed or returned an incomplete buffer: %1").arg(status));
-      if (m_capture_start < 0 && !m_cancelled)
-        stopTest(tr("PSU acquisition start was not observed; dataset invalid"));
+            tr("PSU failed or returned an incomplete buffer: %1").arg(result));
+      if (!outcome.acquisition_started && !m_cancelled)
+        stopTest(tr("PSU acquisition start was not observed"));
       emit busyChanged();
     }
   }
-  if (m_running && distinct && m_motion_ack &&
-      m_active_joint < m_frame.joints.size()) {
-    const bool in_band =
-        std::fabs(sample.torque_nm) <= m_band->value() &&
-        std::fabs(sample.speed_rpm - m_rpm->value()) <= m_tolerance->value() &&
-        std::isfinite(m_frame.joints[m_active_joint].velocity_deg_s) &&
-        std::fabs(m_frame.joints[m_active_joint].velocity_deg_s / 6 -
-                  m_rpm->value()) <= m_tolerance->value();
-    if (m_phase == Phase::Dwell) {
-      if (!in_band)
-        m_dwell_start = -1;
-      else if (m_dwell_start < 0)
-        m_dwell_start = wall;
-      else if (wall - m_dwell_start >= m_dwell->value()) {
-        m_phase = Phase::SupplyStarting;
-        beginAcquisition();
-      }
-      if (m_phase == Phase::Dwell)
-        m_status->setText(
-            tr("Armed: %1 s in band (required %2 s).")
-                .arg(m_dwell_start < 0 ? 0 : wall - m_dwell_start, 0, 'f', 2)
-                .arg(m_dwell->value()));
-    } else if (m_phase == Phase::SupplyStarting ||
-               (m_phase == Phase::Acquiring && !m_sensor_done)) {
-      if (!in_band)
-        stopTest(tr("No-load torque / speed left the valid band"));
-      else if (m_phase == Phase::Acquiring && !m_sensor_done)
-        m_sensor_samples.push_back(sample);
-    }
+  if (distinct && fresh) {
+    const bool in_band = inBand(sample);
+    if (!in_band)
+      m_dwell_start = -1;
+    else if (m_dwell_start < 0)
+      m_dwell_start = wall;
+    m_band_status->setText(
+        (m_dwell_start >= 0 && wall - m_dwell_start >= m_dwell->value()
+             ? tr("Torsiometer: in band for %1 s (dwell %2 s reached).")
+             : (in_band ? tr("Torsiometer: in band for %1 s (dwell %2 s).")
+                        : tr("Torsiometer: OUT OF BAND; %1 s in band "
+                             "(dwell %2 s).")))
+            .arg(m_dwell_start < 0 ? 0 : wall - m_dwell_start, 0, 'f', 2)
+            .arg(m_dwell->value()));
   }
-  if (m_supply_done)
-    m_sensor_done = true;
-  if (m_dataset_pending && m_supply_done && (m_sensor_done || m_cancelled))
+  if (m_dataset_pending && !m_cancelled && !m_supply_done && !drainCapture())
+    stopTest(tr("Acquisition buffer overflow: DAQ dropped %1, drive dropped %2")
+                 .arg(m_daq_dropped)
+                 .arg(m_drive_dropped));
+  if (m_dataset_pending && m_supply_done)
     finishAcquisition();
   updateControls();
 }
 
+bool NoLoadTestDialog::drainCapture(bool stop) {
+  if (m_daq)
+    m_daq_dropped = m_daq->captureBuffer().drain(m_sensor_samples, stop);
+  if (m_drive_capture)
+    m_drive_dropped = m_drive_capture->drain(m_drive_samples, stop);
+  return m_daq_dropped == 0 && m_drive_dropped == 0;
+}
+
 void NoLoadTestDialog::stopTest(const QString &reason) {
   if (m_dataset_pending) {
+    drainCapture(true);
     m_cancelled = true;
-    m_valid = false;
-    m_sensor_done = true;
+    m_acquisition_complete = false;
     m_result = reason;
   }
   if (m_supply)
@@ -554,44 +902,66 @@ void NoLoadTestDialog::stopTest(const QString &reason) {
 }
 
 void NoLoadTestDialog::finishAcquisition() {
-  m_valid = !m_cancelled && m_supply_ok && !m_sensor_samples.empty();
+  if (!drainCapture(true)) {
+    m_cancelled = true;
+    m_result =
+        tr("Acquisition buffer overflow: DAQ dropped %1, drive dropped %2")
+            .arg(m_daq_dropped)
+            .arg(m_drive_dropped);
+  }
+  m_acquisition_complete = !m_cancelled && m_supply_ok &&
+                           !m_sensor_samples.empty() &&
+                           !m_drive_samples.empty();
+  m_drive_late_intervals = 0;
+  m_drive_max_host_interval_s = 0;
+  for (std::size_t i = 1; i < m_drive_samples.size(); ++i) {
+    const double interval =
+        m_drive_samples[i].host_time_s - m_drive_samples[i - 1].host_time_s;
+    m_drive_max_host_interval_s =
+        std::max(m_drive_max_host_interval_s, interval);
+    if (interval > 1.5 * m_drive_period_s)
+      ++m_drive_late_intervals;
+  }
   m_dataset_pending = false;
-  m_result = m_valid
-                 ? tr("Complete: no-load valid. DUT still rotating until Stop.")
-                 : tr("INVALID acquisition: %1").arg(m_result);
+  m_result =
+      m_acquisition_complete
+          ? (m_running
+                 ? tr("Acquisition complete. DUT speed unchanged; "
+                      "set 0 rpm and Apply speed or use Soft stop.")
+                 : tr("Acquisition complete. DUT and load commands unchanged."))
+          : tr("Acquisition interrupted or incomplete: %1")
+                .arg(m_result.isEmpty() ? tr("Missing DAQ or drive samples")
+                                        : m_result);
+  if (m_drive_late_intervals)
+    m_result += tr("\nTiming warning: %1 drive intervals exceeded %2 ms; "
+                   "maximum host interval %3 ms.")
+                    .arg(m_drive_late_intervals)
+                    .arg(m_drive_period_s * 1500, 0, 'f', 1)
+                    .arg(m_drive_max_host_interval_s * 1000, 0, 'f', 3);
   m_phase = m_running ? Phase::Complete : Phase::Idle;
   m_status->setText(m_result);
   plotPower();
   persistResults();
   updateControls();
+  emit busyChanged();
 }
 
-bool NoLoadTestDialog::saveCsv(const QString &path, bool supply) {
-  QSaveFile file(path);
-  if (!file.open(QIODevice::WriteOnly | QIODevice::Text))
-    return false;
-  QTextStream out(&file);
-  out.setRealNumberPrecision(17);
-  out << m_metadata << "# no_load_valid=" << (m_valid ? 1 : 0)
-      << "\n# interrupted=" << (m_interrupted || m_cancelled ? 1 : 0)
-      << "\n# result=" << m_result
-      << "\n# synchronization=independent clocks; synchronize in "
-         "post-processing\n";
-  if (supply) {
-    out << "# source=instrument ELOG samples\n"
-           "elog_time_s,supply_voltage_v,supply_current_a\n";
-    for (const auto &s : m_supply_samples)
-      out << s.t_s << ',' << s.voltage_v << ',' << s.current_a << '\n';
-  } else {
-    out << "# source=polled latest DAQ samples; NOT full-rate acquisition\n"
-           "daq_time_s,external_raw_torque_nm,external_filtered_torque_nm,"
-           "external_speed_rpm\n";
-    for (const auto &s : m_sensor_samples)
-      out << s.t_s << ',' << s.torque_nm << ',' << s.filtered_torque_nm << ','
-          << s.speed_rpm << '\n';
-  }
-  out.flush();
-  return out.status() == QTextStream::Ok && file.commit();
+bool NoLoadTestDialog::saveCsv(const QString &path, NoLoadCsvSource source,
+                               QString &error) {
+  const NoLoadDatasetView dataset{
+      .metadata = m_metadata,
+      .result = m_result,
+      .interrupted = m_interrupted || m_cancelled,
+      .joint = m_active_joint,
+      .daq_dropped = m_daq_dropped,
+      .drive_dropped = m_drive_dropped,
+      .drive_period_s = m_drive_period_s,
+      .drive_late_intervals = m_drive_late_intervals,
+      .drive_max_host_interval_s = m_drive_max_host_interval_s,
+      .sensor_samples = m_sensor_samples,
+      .supply_samples = m_supply_samples,
+      .drive_samples = m_drive_samples};
+  return saveNoLoadCsv(path, source, dataset, error);
 }
 
 void NoLoadTestDialog::persistResults() {
@@ -607,29 +977,44 @@ void NoLoadTestDialog::persistResults() {
       QDir(directory).filePath("no-load-" + m_session + "-sensor.csv");
   m_supply_path =
       QDir(directory).filePath("no-load-" + m_session + "-supply.csv");
-  const bool sensor_ok = saveCsv(m_sensor_path, false);
-  const bool supply_ok = saveCsv(m_supply_path, true);
-  m_saved->setText(sensor_ok && supply_ok
-                       ? tr("Saved %1 dataset:\n%2\n%3")
-                             .arg(m_valid ? tr("valid") : tr("INVALID"),
-                                  m_sensor_path, m_supply_path)
-                       : tr("Automatic save failed; data remains in memory. "
-                            "Check test directory: %1")
-                             .arg(directory));
+  m_drive_path =
+      QDir(directory).filePath("no-load-" + m_session + "-drive.csv");
+  QString sensor_error, supply_error, drive_error;
+  const bool sensor_ok =
+      saveCsv(m_sensor_path, NoLoadCsvSource::Sensor, sensor_error);
+  const bool supply_ok =
+      saveCsv(m_supply_path, NoLoadCsvSource::Supply, supply_error);
+  const bool drive_ok =
+      saveCsv(m_drive_path, NoLoadCsvSource::Drive, drive_error);
+  m_saved->setText(
+      sensor_ok && supply_ok && drive_ok
+          ? tr("Saved dataset:\n%1\n%2\n%3")
+                .arg(m_sensor_path, m_supply_path, m_drive_path)
+          : tr("Automatic save failed; data remains in memory. "
+               "Check test directory: %1\n%2\n%3\n%4")
+                .arg(directory, sensor_error, supply_error, drive_error));
 }
 
 void NoLoadTestDialog::exportResults() {
   if (!m_export->isEnabled())
     return;
-  for (bool supply : {false, true}) {
-    const QString path = QFileDialog::getSaveFileName(
-        this,
-        supply ? tr("Export PSU CSV copy")
-               : tr("Export polled sensor CSV copy"),
-        supply ? m_supply_path : m_sensor_path, tr("CSV files (*.csv)"));
-    if (!path.isEmpty() && !saveCsv(path, supply))
+  for (const auto source : {NoLoadCsvSource::Sensor, NoLoadCsvSource::Supply,
+                            NoLoadCsvSource::Drive}) {
+    const bool supply = source == NoLoadCsvSource::Supply;
+    const bool drive = source == NoLoadCsvSource::Drive;
+    const QString path =
+        QFileDialog::getSaveFileName(this,
+                                     supply  ? tr("Export PSU CSV copy")
+                                     : drive ? tr("Export drive CSV copy")
+                                             : tr("Export DAQ CSV copy"),
+                                     supply  ? m_supply_path
+                                     : drive ? m_drive_path
+                                             : m_sensor_path,
+                                     tr("CSV files (*.csv)"));
+    QString error;
+    if (!path.isEmpty() && !saveCsv(path, source, error))
       QMessageBox::warning(this, tr("Export failed"),
-                           tr("Could not save %1").arg(path));
+                           tr("Could not save %1: %2").arg(path, error));
   }
 }
 

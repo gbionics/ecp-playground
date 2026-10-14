@@ -11,6 +11,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 
 include(FetchContent)
+include(CTest)
 
 FetchContent_Declare(
     ethercat_primer
@@ -18,7 +19,12 @@ FetchContent_Declare(
     GIT_TAG         main
 )
 
-FetchContent_MakeAvailable(ethercat_primer)
+# BUILD_TESTING controls this project's hardware-free regressions, not the
+# dependency's Catch2 suite (which would require an additional dependency).
+block(SCOPE_FOR VARIABLES)
+    set(BUILD_TESTING OFF)
+    FetchContent_MakeAvailable(ethercat_primer)
+endblock()
 
 
 
@@ -106,4 +112,8 @@ add_custom_target(
 
 if(BUILD_GUI)
     add_subdirectory(gui)
+endif()
+
+if(BUILD_TESTING)
+    add_subdirectory(tests)
 endif()

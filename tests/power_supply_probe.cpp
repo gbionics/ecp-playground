@@ -3,6 +3,7 @@
 
 #include "actuator_test/power_supply.hpp"
 
+#include <cassert>
 #include <chrono>
 #include <cstdlib>
 #include <iomanip>
@@ -22,6 +23,8 @@ int main(int argc, char **argv) {
   config.sample_period_s = std::stod(argv[5]);
   const double stop_after = std::stod(argv[3]);
   actuator_test::PowerSupplyReader reader(config);
+  assert(reader.progress().state ==
+         actuator_test::PowerSupplyReader::State::Idle);
   reader.start();
   const auto start = std::chrono::steady_clock::now();
   while (!reader.finished()) {
@@ -40,7 +43,21 @@ int main(int argc, char **argv) {
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(5));
   }
-  std::cout << reader.status() << '\n';
+  const auto progress = reader.progress();
+  using State = actuator_test::PowerSupplyReader::State;
+  assert(reader.status() == progress.message);
+  if (progress.message.starts_with("ELOG error:")) {
+    assert(progress.state == State::Failed);
+  } else if (reader.interrupted()) {
+    assert(progress.state == State::Interrupted);
+  } else if (progress.message.find("WARNING:") != std::string::npos) {
+    assert(progress.state == State::Incomplete);
+    assert(progress.acquisition_started);
+  } else {
+    assert(progress.state == State::Complete);
+    assert(progress.acquisition_started);
+  }
+  std::cout << progress.message << '\n';
   std::cout << "interrupted=" << reader.interrupted() << '\n';
   std::cout << std::setprecision(17);
   for (const auto &sample : reader.takeSamples()) {

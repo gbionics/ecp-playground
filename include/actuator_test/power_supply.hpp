@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Generative Bionics S.R.L.
 // SPDX-License-Identifier: BSD-3-Clause
 //
-// Finite ITECH IT-M3900C ELOG acquisition over LAN. Sampling is performed
+// Finite ITECH IT-M3902C-80-40 ELOG acquisition over LAN. Sampling is performed
 // by the instrument; the worker downloads ASCII records after completion.
 // Only remote mode and ELOG configuration are changed, never output settings.
 
@@ -28,6 +28,25 @@ struct PowerSupplyConfig {
 
 class PowerSupplyReader {
 public:
+  enum class State {
+    Idle,
+    Connecting,
+    Arming,
+    Acquiring,
+    Downloading,
+    Complete,
+    Incomplete,
+    Interrupted,
+    Failed,
+  };
+
+  struct Progress {
+    State state = State::Idle;
+    std::string message;
+    /// Retained after acquisition, so GUI polling cannot miss the trigger.
+    bool acquisition_started = false;
+  };
+
   struct Sample {
     double t_s = 0.0; ///< ELOG-relative time, not drive telemetry time.
     double voltage_v = 0.0;
@@ -52,6 +71,8 @@ public:
 
   /// Human-readable connection state / last communication error.
   std::string status() const;
+  /// Coherent state and display message; control flow must use the state.
+  Progress progress() const;
 
 private:
   void run();
@@ -60,7 +81,7 @@ private:
   void command(const std::string &command);
   std::string query(const std::string &command, double timeout_s);
   void waitSocket(short events, std::chrono::steady_clock::time_point deadline);
-  void setStatus(std::string status);
+  void setProgress(State state, std::string message);
   void sleepFor(double seconds) const;
 
   PowerSupplyConfig m_cfg;
@@ -73,7 +94,7 @@ private:
 
   mutable std::mutex m_mutex;
   std::vector<Sample> m_samples;
-  std::string m_status;
+  Progress m_progress;
 };
 
 } // namespace actuator_test

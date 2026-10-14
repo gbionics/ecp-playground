@@ -613,6 +613,22 @@ void ControllerWorker::handleCommand(const SpeedHoldCommand &c) {
     }
     return;
   }
+  if (ct.activity == Activity::SpeedHold) {
+    // Live speed change: gains and travel mode stay as started.
+    if (c.pvt_kp != ct.speed_hold_kp || c.pvt_kd != ct.speed_hold_kd ||
+        c.continuous_rotation != ct.continuous_rotation ||
+        !valid_speed_hold_parameters(c.velocity_deg_s, c.ramp_time_s,
+                                     jh.driver->encoder_bits(), c.pvt_kd,
+                                     c.pvt_kp, true)) {
+      error("invalid no-load speed change on '" + jh.name +
+            "'; keeping the previous speed");
+      return;
+    }
+    ct.speed_hold.retarget(c.velocity_deg_s, c.ramp_time_s);
+    log("no-load speed changed on '" + jh.name + "' to " +
+        std::to_string(c.velocity_deg_s / 6.0) + " rpm");
+    return;
+  }
   if (!impl.bus_up || m_state.load() == ControllerState::Disconnected ||
       m_state.load() == ControllerState::Faulted || !jh.driver ||
       !jh.selectable || jh.operation_mode_code != ecp::DS402::OP_PVT ||
@@ -1310,7 +1326,7 @@ void ControllerWorker::controlTick() {
       const double permille =
           rated_a > 0.0 ? (ct.target_current_a / rated_a * 1000.0) : 0.0;
       d.set_target_torque(static_cast<int16_t>(
-          std::clamp(permille, -32000.0, 32000.0)));
+          std::round(std::clamp(permille, -32000.0, 32000.0))));
       break;
     }
 
@@ -1526,6 +1542,8 @@ void ControllerWorker::publishTelemetry() {
       }
 
       jt.min_limit_deg = actuator_test::counts2deg(ct.min_counts, bits);
+      jt.current_control_active =
+          ct.activity == Activity::Current || ct.activity == Activity::CurrentRamp;
       jt.max_limit_deg = actuator_test::counts2deg(ct.max_counts, bits);
       const bool soft_valid = (ct.soft_max_counts > ct.soft_min_counts);
       const double soft_min_counts =
@@ -1558,6 +1576,12 @@ void ControllerWorker::publishTelemetry() {
       jt.cia402_state = map_status_to_cia402_state(jt.status, jt.fault);
       jt.phase = (ct.activity == Activity::Trajectory) ? ct.phase : 0;
     }
+    if (jh.driver)
+      m_capture->push(
+          {i, static_cast<uint64_t>(impl.tick), frame.t_s,
+           std::chrono::duration<double>(
+               std::chrono::steady_clock::now().time_since_epoch()).count(),
+           jt.velocity_deg_s / 6.0});
     frame.joints.push_back(std::move(jt));
   }
 

@@ -53,6 +53,8 @@ public:
 
   /// True while a sweep is actively stepping through current levels.
   bool isRunning() const { return m_running; }
+  /// Running, or still downloading the DC supply ELOG after the sweep.
+  bool isBusy() const;
 
   /// Uses the app-wide DAQ reader so the locked-rotor result and the main
   /// dashboard observe the same physical torsiometer sample.
@@ -98,7 +100,6 @@ private:
   };
 
   void onStartClicked();
-  void onStopClicked();
   void buildSteps();
   void finishStep();
   void beginStep(std::size_t index);
@@ -106,7 +107,7 @@ private:
   void appendResultRow(int step_number, const StepResult &r);
   void exportResultsCsv();
   std::size_t selectedJoint() const;
-  void updateStartEnabled();
+  void updateControls();
   void updateExternalDaqAvailability();
   void updatePowerSupply();
   bool savePowerSupplyCsv(const QString &path);
@@ -155,7 +156,6 @@ private:
   QLineEdit *m_ext_digital_a_edit = nullptr;
   QLineEdit *m_ext_digital_b_edit = nullptr;
   QLabel *m_ext_daq_status_label = nullptr;
-  std::shared_ptr<actuator_test::ExternalDaqReader> m_app_external_daq;
   std::shared_ptr<actuator_test::ExternalDaqReader> m_external_daq;
   bool m_owns_external_daq = false;
   double m_sum_ext_torque = 0.0;
@@ -173,12 +173,10 @@ private:
   bool m_running = false;
   std::size_t m_active_joint = 0;
 
-  bool m_have_step_t0 = false;
-  bool m_have_step_command_t0 = false;
   bool m_waiting_for_ramp = false;
   bool m_ramp_observed = false;
-  double m_step_t0_s = 0.0;
-  double m_step_command_t0_s = 0.0;
+  std::optional<double> m_step_t0_s;
+  std::optional<double> m_step_command_t0_s;
   double m_sum_current = 0.0;
   double m_sum_torque = 0.0;
   double m_peak_current = 0.0;
@@ -195,6 +193,7 @@ private:
   int m_series_iv_ext_up = -1;
   int m_series_iv_ext_down = -1;
   int m_series_ext_raw_torque = -1;
+  double m_last_plotted_ext_t_s = 0.0;
 
   QCheckBox *m_psu_check = nullptr;
   QLineEdit *m_psu_host_edit = nullptr;

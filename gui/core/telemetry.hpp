@@ -10,11 +10,40 @@
 
 #pragma once
 
+#include "actuator_test/sample_buffer.hpp"
+
+#include <atomic>
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <vector>
 
 namespace actuator_test::gui {
+
+struct DriveSample {
+  std::size_t joint = 0;
+  uint64_t cycle_index = 0;
+  double t_s = 0;
+  double host_time_s = 0;
+  double speed_rpm = 0;
+};
+
+class DriveCapture : public actuator_test::SampleBuffer<DriveSample> {
+public:
+  using actuator_test::SampleBuffer<DriveSample>::SampleBuffer;
+
+  void start(std::size_t joint) {
+    m_joint.store(joint);
+    actuator_test::SampleBuffer<DriveSample>::start();
+  }
+  void push(const DriveSample &sample) {
+    if (sample.joint == m_joint.load())
+      actuator_test::SampleBuffer<DriveSample>::push(sample);
+  }
+
+private:
+  std::atomic<std::size_t> m_joint{std::numeric_limits<std::size_t>::max()};
+};
 
 /// High-level state of the controller, surfaced to the GUI for enabling and
 /// disabling actions.
@@ -74,6 +103,7 @@ struct JointTelemetry {
   double current_a = 0.0;      ///< Estimated phase current from DS402 torque.
   double commanded_current_a = 0.0; ///< Reference sent to current control.
   bool current_transition_active = false; ///< A smooth current ramp is active.
+  bool current_control_active = false; ///< Constant current or current ramp.
   bool speed_hold_active = false;
   double speed_hold_target_deg_s = 0.0;
   int32_t speed_hold_kp = 0;

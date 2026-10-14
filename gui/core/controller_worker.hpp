@@ -13,6 +13,7 @@
 
 #include "actuator_test/settings.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
@@ -77,6 +78,13 @@ public:
 
   /// Thread-safe: copy the most recent telemetry frame.
   TelemetryFrame snapshot() const;
+  std::shared_ptr<DriveCapture> captureBuffer() const {
+    return m_capture;
+  }
+  double capturePeriodS() const {
+    return std::max(1, static_cast<int>(m_profile.loop_rate_hz / 100.0)) *
+           m_profile.loop_period_s();
+  }
 
   /// Thread-safe: take and clear the pending events.
   std::vector<WorkerEvent> drainEvents();
@@ -141,6 +149,7 @@ private:
 
   mutable std::mutex m_snap_mutex;
   TelemetryFrame m_snapshot;
+  std::shared_ptr<DriveCapture> m_capture = std::make_shared<DriveCapture>();
 
   mutable std::mutex m_event_mutex;
   std::vector<WorkerEvent> m_events;

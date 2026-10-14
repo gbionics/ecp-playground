@@ -6,11 +6,11 @@
 
 find_package(Qt6 REQUIRED COMPONENTS Widgets)
 
-add_executable(
-    actuator-test-gui
-    main.cpp
+add_library(
+    actuator_test_gui STATIC
     main_window.cpp
     core/controller_worker.cpp
+    core/no_load_dataset.cpp
     core/update_scheduler.cpp
     widgets/connection_panel.cpp
     widgets/jog_panel.cpp
@@ -44,16 +44,20 @@ add_executable(
     wizard/setup_wizard.hpp
 )
 
-set_property(TARGET actuator-test-gui PROPERTY CXX_SCAN_FOR_MODULES OFF)
-set_target_properties(actuator-test-gui PROPERTIES AUTOMOC ON)
+set_property(TARGET actuator_test_gui PROPERTY CXX_SCAN_FOR_MODULES OFF)
+set_target_properties(actuator_test_gui PROPERTIES AUTOMOC ON)
 
-target_include_directories(actuator-test-gui PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(actuator_test_gui PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(
-    actuator-test-gui
-    PRIVATE
+    actuator_test_gui
+    PUBLIC
         actuator_test_core
         Qt6::Widgets
 )
+
+add_executable(actuator-test-gui main.cpp)
+set_property(TARGET actuator-test-gui PROPERTY CXX_SCAN_FOR_MODULES OFF)
+target_link_libraries(actuator-test-gui PRIVATE actuator_test_gui)
 
 add_custom_target(
     actuator-test-gui-capabilities

@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <initializer_list>
 #include <numbers>
 
 namespace actuator_test::gui {
@@ -56,36 +57,23 @@ DampedCurrentSettleDialog::DampedCurrentSettleDialog(QWidget *parent)
   auto *form = new QFormLayout(box);
   m_joint_combo = new QComboBox();
   form->addRow(tr("Joint:"), m_joint_combo);
-  m_amplitude_spin = new QDoubleSpinBox();
-  m_amplitude_spin->setRange(0.05, 70.0);
-  m_amplitude_spin->setDecimals(2);
-  m_amplitude_spin->setValue(1.0);
-  m_amplitude_spin->setSuffix(tr(" A"));
-  form->addRow(tr("Initial amplitude (A0):"), m_amplitude_spin);
-  m_decay_spin = new QDoubleSpinBox();
-  m_decay_spin->setRange(0.05, 60.0);
-  m_decay_spin->setDecimals(2);
-  m_decay_spin->setValue(2.0);
-  m_decay_spin->setSuffix(tr(" s"));
-  form->addRow(tr("Decay constant (tau):"), m_decay_spin);
-  m_frequency_spin = new QDoubleSpinBox();
-  m_frequency_spin->setRange(0.05, 20.0);
-  m_frequency_spin->setDecimals(2);
-  m_frequency_spin->setValue(1.0);
-  m_frequency_spin->setSuffix(tr(" Hz"));
-  form->addRow(tr("Frequency:"), m_frequency_spin);
-  m_duration_spin = new QDoubleSpinBox();
-  m_duration_spin->setRange(0.1, 120.0);
-  m_duration_spin->setDecimals(1);
-  m_duration_spin->setValue(8.0);
-  m_duration_spin->setSuffix(tr(" s"));
-  form->addRow(tr("Excitation duration:"), m_duration_spin);
-  m_settle_spin = new QDoubleSpinBox();
-  m_settle_spin->setRange(0.1, 30.0);
-  m_settle_spin->setDecimals(1);
-  m_settle_spin->setValue(1.0);
-  m_settle_spin->setSuffix(tr(" s"));
-  form->addRow(tr("Zero-current measurement:"), m_settle_spin);
+  const auto spin = [form](const QString &label, double lo, double hi,
+                           double value, int decimals, const QString &suffix) {
+    auto *widget = new QDoubleSpinBox();
+    widget->setRange(lo, hi);
+    widget->setDecimals(decimals);
+    widget->setValue(value);
+    widget->setSuffix(suffix);
+    form->addRow(label, widget);
+    return widget;
+  };
+  m_amplitude_spin =
+      spin(tr("Initial amplitude (A0):"), 0.05, 70, 1, 2, tr(" A"));
+  m_decay_spin = spin(tr("Decay constant (tau):"), 0.05, 60, 2, 2, tr(" s"));
+  m_frequency_spin = spin(tr("Frequency:"), 0.05, 20, 1, 2, tr(" Hz"));
+  m_duration_spin = spin(tr("Excitation duration:"), 0.1, 120, 8, 1, tr(" s"));
+  m_settle_spin =
+      spin(tr("Zero-current measurement:"), 0.1, 30, 1, 1, tr(" s"));
   m_confirm_check =
       new QCheckBox(tr("I confirm the shaft is free to move safely"));
   form->addRow(m_confirm_check);
@@ -157,11 +145,11 @@ DampedCurrentSettleDialog::DampedCurrentSettleDialog(QWidget *parent)
   connect(m_tare_btn, &QPushButton::clicked, this,
           &DampedCurrentSettleDialog::tare);
   connect(m_confirm_check, &QCheckBox::toggled, this,
-          [this](bool) { updateStartEnabled(); });
+          [this](bool) { updateControls(); });
   connect(m_joint_combo, QOverload<int>::of(&QComboBox::currentIndexChanged),
           this, [this](int) {
             updateAmplitudeLimit();
-            updateStartEnabled();
+            updateControls();
           });
   connect(m_window_spin, &QDoubleSpinBox::valueChanged, this,
           [this](double seconds) {
@@ -189,7 +177,7 @@ DampedCurrentSettleDialog::DampedCurrentSettleDialog(QWidget *parent)
     m_time_scrollbar->setValue(m_time_scrollbar->maximum());
     m_scrub_updating = false;
   });
-  updateStartEnabled();
+  updateControls();
 }
 
 void DampedCurrentSettleDialog::setJoints(const std::vector<JointInfo> &joints) {
@@ -204,7 +192,7 @@ void DampedCurrentSettleDialog::setJoints(const std::vector<JointInfo> &joints) 
   m_joint_combo->setCurrentIndex(index >= 0 ? index : 0);
   m_joint_combo->blockSignals(false);
   updateAmplitudeLimit();
-  updateStartEnabled();
+  updateControls();
 }
 
 void DampedCurrentSettleDialog::setExternalDaqReader(
@@ -223,7 +211,12 @@ void DampedCurrentSettleDialog::updateAmplitudeLimit() {
   m_amplitude_spin->setMaximum(std::max(0.05, rated_current_a));
 }
 
-void DampedCurrentSettleDialog::updateStartEnabled() {
+void DampedCurrentSettleDialog::updateControls() {
+  for (auto *widget : std::initializer_list<QWidget *>{
+           m_joint_combo, m_amplitude_spin, m_decay_spin, m_frequency_spin,
+           m_duration_spin, m_settle_spin, m_confirm_check})
+    widget->setEnabled(!m_running);
+  m_stop_btn->setEnabled(m_running);
   m_start_btn->setEnabled(!m_running && m_confirm_check->isChecked() &&
                           !m_joints.empty() &&
                           m_joint_combo->currentIndex() >= 0 &&
@@ -236,17 +229,17 @@ void DampedCurrentSettleDialog::start() {
   }
   m_active_joint = selectedJoint();
   m_running = true;
-  m_have_t0 = false;
+  m_t0_s.reset();
   m_sum_torque_nm = 0.0;
   m_sum_sq_torque_nm = 0.0;
   m_torque_samples = 0;
   m_last_external_sample_t_s = -1.0;
   m_measured_offset_nm.reset();
   m_tare_btn->setEnabled(false);
-  m_current_chart->clearAll();
-  m_external_torque_chart->clearAll();
-  m_current_chart->followLatest();
-  m_external_torque_chart->followLatest();
+  for (auto *chart : {m_current_chart, m_external_torque_chart}) {
+    chart->clearAll();
+    chart->followLatest();
+  }
   m_scrub_updating = true;
   m_time_scrollbar->setRange(0, 0);
   m_scrub_updating = false;
@@ -257,26 +250,16 @@ void DampedCurrentSettleDialog::start() {
                               m_duration_spin->value(), false);
   m_status_label->setText(tr("Applying damped current for %1 s.")
                               .arg(m_duration_spin->value(), 0, 'f', 1));
-  m_joint_combo->setEnabled(false);
-  m_amplitude_spin->setEnabled(false);
-  m_decay_spin->setEnabled(false);
-  m_frequency_spin->setEnabled(false);
-  m_duration_spin->setEnabled(false);
-  m_settle_spin->setEnabled(false);
-  m_confirm_check->setEnabled(false);
-  m_start_btn->setEnabled(false);
-  m_stop_btn->setEnabled(true);
+  updateControls();
 }
 
 void DampedCurrentSettleDialog::appendTelemetry(const TelemetryFrame &frame) {
   if (!m_running || m_active_joint >= frame.joints.size()) {
     return;
   }
-  if (!m_have_t0) {
+  if (!m_t0_s)
     m_t0_s = frame.t_s;
-    m_have_t0 = true;
-  }
-  const double elapsed_s = frame.t_s - m_t0_s;
+  const double elapsed_s = frame.t_s - *m_t0_s;
   const auto &joint = frame.joints[m_active_joint];
   const double command_a =
       elapsed_s < m_duration_spin->value()
@@ -354,16 +337,8 @@ void DampedCurrentSettleDialog::stop(const QString &reason) {
   }
   m_running = false;
   emit dampedCurrentRequested(m_active_joint, 0.0, 0.0, 0.0, 0.0, true);
-  m_joint_combo->setEnabled(true);
-  m_amplitude_spin->setEnabled(true);
-  m_decay_spin->setEnabled(true);
-  m_frequency_spin->setEnabled(true);
-  m_duration_spin->setEnabled(true);
-  m_settle_spin->setEnabled(true);
-  m_confirm_check->setEnabled(true);
-  m_stop_btn->setEnabled(false);
   m_status_label->setText(tr("Idle (%1).").arg(reason));
-  updateStartEnabled();
+  updateControls();
 }
 
 void DampedCurrentSettleDialog::tare() {

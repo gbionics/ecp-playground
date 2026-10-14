@@ -45,9 +45,6 @@ public:
   /// Register a named series and return its index.
   int addSeries(const QString &name, const QColor &color);
 
-  /// Update a series legend label.
-  void setSeriesName(int series, const QString &name);
-
   /// Remove every series (definitions and data).
   void resetSeries();
 
@@ -195,7 +192,6 @@ private:
   std::vector<DrawItem> m_items;
   int m_external_raw_torque_chart = -1;
   int m_external_raw_torque_series = -1;
-  std::deque<QPointF> m_external_raw_torque_samples;
 
   QStringList m_joint_names;
   ViewMode m_mode = ViewMode::Focus;

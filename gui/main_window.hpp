@@ -119,7 +119,7 @@ private:
   LockedRotorTestDialog *m_locked_rotor_test = nullptr;
   DampedCurrentSettleDialog *m_damped_current_settle = nullptr;
   NoLoadTestDialog *m_no_load_test = nullptr;
-  bool m_damped_current_active = false;
+  double m_last_plotted_daq_t_s = 0.0;
   std::shared_ptr<actuator_test::ExternalDaqReader> m_external_daq;
   bool m_external_daq_error_reported = false;
 
