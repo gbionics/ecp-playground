@@ -245,12 +245,65 @@ void StripChart::paintEvent(QPaintEvent *) {
   for (const auto &s : m_series) {
     if (s.points.size() >= 2) {
       QPolygonF poly;
-      poly.reserve(static_cast<int>(s.points.size()));
-      for (const auto &pt : s.points) {
-        if (m_x_axis == XAxis::Time && (pt.x() < x_min || pt.x() > x_max)) {
-          continue;
+      if (m_x_axis == XAxis::Time &&
+          s.points.size() > 2 * static_cast<std::size_t>(plot.width())) {
+        // Long histories: keep only first/min/max/last per pixel column (in
+        // order of occurrence). Visually identical, but the paint cost stops
+        // growing with the number of samples.
+        poly.reserve(4 * static_cast<int>(plot.width()) + 8);
+        bool open = false;
+        int col = 0;
+        QPointF first, last, lo, hi;
+        std::size_t lo_i = 0, hi_i = 0;
+        auto flush = [&] {
+          poly << first;
+          if (lo_i <= hi_i) {
+            poly << lo << hi;
+          } else {
+            poly << hi << lo;
+          }
+          poly << last;
+        };
+        std::size_t i = 0;
+        for (const auto &pt : s.points) {
+          ++i;
+          if (pt.x() < x_min || pt.x() > x_max) {
+            continue;
+          }
+          const QPointF px = toPx(pt);
+          const int c = static_cast<int>(px.x());
+          if (!open || c != col) {
+            if (open) {
+              flush();
+            }
+            open = true;
+            col = c;
+            first = last = lo = hi = px;
+            lo_i = hi_i = i;
+            continue;
+          }
+          last = px;
+          // Screen y grows downwards: "lo" is the largest pixel y.
+          if (px.y() > lo.y()) {
+            lo = px;
+            lo_i = i;
+          }
+          if (px.y() < hi.y()) {
+            hi = px;
+            hi_i = i;
+          }
         }
-        poly << toPx(pt);
+        if (open) {
+          flush();
+        }
+      } else {
+        poly.reserve(static_cast<int>(s.points.size()));
+        for (const auto &pt : s.points) {
+          if (m_x_axis == XAxis::Time && (pt.x() < x_min || pt.x() > x_max)) {
+            continue;
+          }
+          poly << toPx(pt);
+        }
       }
       p.setPen(QPen(s.color, 1.5));
       p.drawPolyline(poly);

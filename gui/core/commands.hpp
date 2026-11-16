@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include "actuator_test/cyclic_current.hpp"
 #include "actuator_test/types.hpp"
 
 #include <cstdint>
@@ -75,6 +76,11 @@ struct CurrentRampCommand {
   double ramp_time_s = 0.0;
 };
 
+struct CyclicCurrentCommand {
+  std::size_t joint = 0;
+  actuator_test::CyclicCurrentProfile profile;
+};
+
 /// Apply a zero-centred exponentially damped sinusoidal current at the
 /// real-time control rate, then hold 0 A until explicitly released.
 struct DampedCurrentCommand {
@@ -135,6 +141,7 @@ struct ShutdownCommand {};
 using Command =
     std::variant<ConnectCommand, DisconnectCommand, JogCommand, SpeedHoldCommand,
                  GoToCommand, CurrentCommand, CurrentRampCommand,
+                 CyclicCurrentCommand,
                  CaptureLimitsCommand, SetLimitsCommand, DampedCurrentCommand,
                  ResetLimitsCommand, StartTrajectoryCommand, StopCommand,
                  ResetFaultCommand, PauseCommand, RecordCommand, ShutdownCommand>;

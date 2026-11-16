@@ -39,6 +39,12 @@ configure_probe(speed-hold-probe)
 enable_probe_ubsan(speed-hold-probe)
 add_probe_test(speed-hold speed-hold-probe test_speed_hold.py ACTUATOR_TEST_SPEED_HOLD_PROBE)
 
+add_executable(cyclic-current-probe cyclic_current_probe.cpp)
+configure_probe(cyclic-current-probe)
+enable_probe_ubsan(cyclic-current-probe)
+add_test(NAME cyclic-current COMMAND $<TARGET_FILE:cyclic-current-probe>)
+set_tests_properties(cyclic-current PROPERTIES TIMEOUT 10 LABELS "hardware-free")
+
 add_executable(power-supply-probe
     power_supply_probe.cpp ${PROJECT_SOURCE_DIR}/src/actuator_test/power_supply.cpp)
 configure_probe(power-supply-probe)
@@ -59,6 +65,13 @@ foreach(mode IN ITEMS stub fake)
 endforeach()
 
 if(BUILD_GUI)
+    add_executable(thermal-csv-probe thermal_csv_probe.cpp)
+    configure_probe(thermal-csv-probe)
+    target_link_libraries(thermal-csv-probe PRIVATE actuator_test_gui)
+    add_test(NAME thermal-csv COMMAND ${CMAKE_COMMAND} -E env
+        "QT_QPA_PLATFORM=offscreen" $<TARGET_FILE:thermal-csv-probe>)
+    set_tests_properties(thermal-csv PROPERTIES TIMEOUT 30 LABELS "hardware-free")
+
     add_executable(no-load-gui-probe no_load_gui_probe.cpp)
     configure_probe(no-load-gui-probe)
     target_link_libraries(no-load-gui-probe PRIVATE actuator_test_gui)

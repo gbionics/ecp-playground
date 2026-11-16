@@ -24,6 +24,7 @@ add_library(
     widgets/locked_rotor_test_panel.cpp
     widgets/no_load_test_panel.cpp
     widgets/damped_current_settle_panel.cpp
+    widgets/thermal_test_panel.cpp
     wizard/setup_wizard.cpp
     # Headers with Q_OBJECT listed so AUTOMOC always processes them.
     main_window.hpp
@@ -41,6 +42,7 @@ add_library(
     widgets/locked_rotor_test_panel.hpp
     widgets/no_load_test_panel.hpp
     widgets/damped_current_settle_panel.hpp
+    widgets/thermal_test_panel.hpp
     wizard/setup_wizard.hpp
 )
 

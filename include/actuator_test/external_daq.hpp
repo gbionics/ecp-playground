@@ -23,8 +23,10 @@
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 
@@ -33,6 +35,7 @@ namespace actuator_test {
 /// Channel/rate configuration, defaulted to match the Python reference tool.
 struct ExternalDaqConfig {
   std::string analog_channel = "Dev1/ai28";        ///< Torsiometer AI.
+  std::string temperature_channel; ///< Optional differential AT20, in the same AI task.
   std::string digital_line_a = "Dev1/port0/line5"; ///< Encoder quadrature A.
   std::string digital_line_b = "Dev1/port0/line6"; ///< Encoder quadrature B.
   double torque_sensitivity_v_per_nm = 0.025;      ///< TS112: +-5V @ +-200Nm.
@@ -55,6 +58,36 @@ struct ExternalDaqConfig {
 /// configure time). When false, ExternalDaqReader::start() always fails.
 bool external_daq_supported() noexcept;
 
+/// Independent, on-demand differential voltage input for a 0-10 V AT20.
+class TemperatureDaqReader {
+public:
+  struct Sample {
+    double voltage_v = 0.0;
+    double temperature_c = 0.0;
+    double steady_time_s = 0.0;
+  };
+  explicit TemperatureDaqReader(std::string channel = "Dev1/ai0");
+  ~TemperatureDaqReader();
+  bool start(std::string &error);
+  void stop();
+  bool running() const { return m_running.load(); }
+  std::optional<Sample> latest() const;
+  std::string lastError() const;
+  static double temperatureC(double voltage_v) { return 15.0 * voltage_v; }
+
+private:
+  void run();
+  std::string m_channel;
+  std::atomic<bool> m_running{false};
+  std::atomic<bool> m_stop{false};
+  std::thread m_thread;
+  mutable std::mutex m_mutex;
+  std::optional<Sample> m_latest;
+  std::string m_error;
+  struct Impl;
+  std::unique_ptr<Impl> m_impl;
+};
+
 /// Owns the NI-DAQmx analog + digital tasks and a background acquisition
 /// thread. All accessors are thread-safe.
 class ExternalDaqReader {
@@ -66,6 +99,8 @@ public:
     double speed_rpm = 0.0;          ///< Low-pass filtered encoder speed.
     double delivery_time_s = 0.0;    ///< Host elapsed time at publication.
     uint64_t sample_index = 0;       ///< End of the hardware sample block.
+    double steady_time_s = 0.0;     ///< Host monotonic publication time.
+    std::optional<TemperatureDaqReader::Sample> temperature = std::nullopt;
   };
 
   explicit ExternalDaqReader(ExternalDaqConfig cfg = {});
@@ -90,8 +125,17 @@ public:
   /// Thread-safe: most recently acquired sample (reset to default on each
   /// successful start, until the first read completes).
   Sample latest() const;
+  struct TorqueMean {
+    double torque_nm = 0.0;
+    double span_s = 0.0;
+    uint64_t samples = 0;
+  };
+  /// Raw sample-weighted mean over whole acquisition blocks (up to 60 s).
+  /// Throws for invalid windows. Partial startup windows report actual span.
+  std::optional<TorqueMean> torqueMean(double window_s) const;
   SampleBuffer<Sample> &captureBuffer() { return m_capture; }
   double analogSampleRateHz() const { return m_cfg.ai_sample_rate_hz; }
+  const std::string &temperatureChannel() const { return m_cfg.temperature_channel; }
   double publicationPeriodS() const {
     return std::max(1.0, std::floor(m_cfg.ai_sample_rate_hz *
                                   m_cfg.publish_period_s)) /
@@ -120,6 +164,12 @@ private:
   std::thread m_thread;
   mutable std::mutex m_mutex;
   Sample m_latest;
+  struct TorqueBlock {
+    double end_s;
+    double sum_nm;
+    uint64_t count;
+  };
+  std::deque<TorqueBlock> m_torque_blocks;
   double m_tare_offset_nm = 0.0;
   std::string m_last_error;
   SampleBuffer<Sample> m_capture;

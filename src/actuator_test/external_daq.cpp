@@ -19,6 +19,121 @@
 
 namespace actuator_test {
 
+struct TemperatureDaqReader::Impl {
+#if defined(ACTUATOR_TEST_HAVE_NIDAQMX)
+  TaskHandle task = nullptr;
+  bool started = false;
+#endif
+};
+
+TemperatureDaqReader::TemperatureDaqReader(std::string channel)
+    : m_channel(std::move(channel)) {}
+
+TemperatureDaqReader::~TemperatureDaqReader() { stop(); }
+
+std::optional<TemperatureDaqReader::Sample> TemperatureDaqReader::latest() const {
+  std::lock_guard<std::mutex> lock(m_mutex);
+  return m_latest;
+}
+
+std::string TemperatureDaqReader::lastError() const {
+  std::lock_guard<std::mutex> lock(m_mutex);
+  return m_error;
+}
+
+void TemperatureDaqReader::stop() {
+  m_stop.store(true);
+  if (m_thread.joinable())
+    m_thread.join();
+#if defined(ACTUATOR_TEST_HAVE_NIDAQMX)
+  if (m_impl && m_impl->task) {
+    const auto report = [this](int32 status) {
+      if (status < 0) {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_error += " NI-DAQmx task cleanup failed (code " +
+                   std::to_string(status) + ")";
+      }
+    };
+    if (m_impl->started)
+      report(DAQmxStopTask(m_impl->task));
+    report(DAQmxClearTask(m_impl->task));
+  }
+#endif
+  m_impl.reset();
+  m_running.store(false);
+}
+
+bool TemperatureDaqReader::start(std::string &error) {
+  stop();
+  {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_latest.reset();
+    m_error.clear();
+  }
+#if !defined(ACTUATOR_TEST_HAVE_NIDAQMX)
+  error = "built without NI-DAQmx support";
+  return false;
+#else
+  m_impl = std::make_unique<Impl>();
+  const auto check = [&error](int32 status) {
+    if (status >= 0)
+      return true;
+    char message[2048] = {};
+    DAQmxGetExtendedErrorInfo(message, sizeof(message));
+    error = message;
+    return false;
+  };
+  if (!check(DAQmxCreateTask("", &m_impl->task)) ||
+      !check(DAQmxCreateAIVoltageChan(
+          m_impl->task, m_channel.c_str(), "", DAQmx_Val_Diff, -10.0, 10.0,
+          DAQmx_Val_Volts, nullptr)) ||
+      !check(DAQmxStartTask(m_impl->task))) {
+    stop();
+    return false;
+  }
+  m_impl->started = true;
+  m_stop.store(false);
+  m_running.store(true);
+  try {
+    m_thread = std::thread([this] { run(); });
+  } catch (const std::exception &ex) {
+    error = ex.what();
+    stop();
+    return false;
+  }
+  return true;
+#endif
+}
+
+void TemperatureDaqReader::run() {
+#if defined(ACTUATOR_TEST_HAVE_NIDAQMX)
+  while (!m_stop.load()) {
+    double volts = 0.0;
+    int32 count = 0;
+    const auto status = DAQmxReadAnalogF64(
+        m_impl->task, 1, 0.25, DAQmx_Val_GroupByChannel, &volts, 1, &count, nullptr);
+    if (status < 0 || count != 1 || !std::isfinite(volts)) {
+      char message[2048] = {};
+      if (status < 0)
+        DAQmxGetExtendedErrorInfo(message, sizeof(message));
+      std::lock_guard<std::mutex> lock(m_mutex);
+      m_error = status < 0 ? std::string(message)
+                          : "invalid or incomplete AT20 voltage sample";
+      break;
+    }
+    const double now = std::chrono::duration<double>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    {
+      std::lock_guard<std::mutex> lock(m_mutex);
+      m_latest = Sample{volts, temperatureC(volts), now};
+    }
+    for (int i = 0; i < 20 && !m_stop.load(); ++i)
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+#endif
+  m_running.store(false);
+}
+
 bool external_daq_supported() noexcept {
 #if defined(ACTUATOR_TEST_HAVE_NIDAQMX)
   return true;
@@ -56,6 +171,8 @@ bool valid_config(const ExternalDaqConfig &cfg) {
          cfg.ai_sample_rate_hz * 4.0 < std::ldexp(1.0, 64) &&
          cfg.di_sample_rate_hz * 4.0 < std::ldexp(1.0, 64) &&
          cfg.ai_sample_rate_hz * cfg.publish_period_s < std::ldexp(1.0, 31) &&
+         (cfg.temperature_channel.empty() ||
+          cfg.ai_sample_rate_hz * cfg.publish_period_s < std::ldexp(1.0, 30)) &&
          // The two DI channels also use signed (di_read + i) indexing.
          cfg.di_sample_rate_hz * cfg.publish_period_s < std::ldexp(1.0, 30) &&
          // Leave room for the retained edge chunk and the next appended chunk.
@@ -154,6 +271,10 @@ bool ExternalDaqReader::start(std::string &error) {
     check_daqmx(DAQmxCreateAIVoltageChan(
         impl->ai_task, cfg.analog_channel.c_str(), "", DAQmx_Val_NRSE, -10.0,
         10.0, DAQmx_Val_Volts, nullptr));
+    if (!cfg.temperature_channel.empty())
+      check_daqmx(DAQmxCreateAIVoltageChan(
+          impl->ai_task, cfg.temperature_channel.c_str(), "", DAQmx_Val_Diff,
+          -10.0, 10.0, DAQmx_Val_Volts, nullptr));
     check_daqmx(DAQmxCfgSampClkTiming(
         impl->ai_task, "", cfg.ai_sample_rate_hz, DAQmx_Val_Rising,
         DAQmx_Val_ContSamps, static_cast<uInt64>(cfg.ai_sample_rate_hz * 4)));
@@ -182,6 +303,7 @@ bool ExternalDaqReader::start(std::string &error) {
     {
       std::lock_guard<std::mutex> lk(m_mutex);
       m_latest = {};
+      m_torque_blocks.clear();
       m_last_error.clear();
     }
     m_thread = std::thread([this] { run(); });
@@ -209,6 +331,29 @@ void ExternalDaqReader::stop() {
 ExternalDaqReader::Sample ExternalDaqReader::latest() const {
   std::lock_guard<std::mutex> lk(m_mutex);
   return m_latest;
+}
+
+std::optional<ExternalDaqReader::TorqueMean>
+ExternalDaqReader::torqueMean(double window_s) const {
+  if (!std::isfinite(window_s) || window_s < 0.1 || window_s > 60.0)
+    throw std::invalid_argument("torque averaging window must be 0.1-60 seconds");
+  std::lock_guard<std::mutex> lk(m_mutex);
+  if (m_torque_blocks.empty())
+    return std::nullopt;
+  TorqueMean mean;
+  double sum = 0.0;
+  const double target_samples = window_s * m_cfg.ai_sample_rate_hz;
+  for (auto it = m_torque_blocks.rbegin(); it != m_torque_blocks.rend(); ++it) {
+    sum += it->sum_nm;
+    mean.samples += it->count;
+    if (static_cast<double>(mean.samples) >= target_samples - 1e-7)
+      break;
+  }
+  if (mean.samples == 0)
+    return std::nullopt;
+  mean.span_s = mean.samples / m_cfg.ai_sample_rate_hz;
+  mean.torque_nm = sum / mean.samples - m_tare_offset_nm;
+  return mean;
 }
 
 bool ExternalDaqReader::tare(double offset_nm) {
@@ -246,7 +391,9 @@ void ExternalDaqReader::run() {
       1, static_cast<int32>(m_cfg.ai_sample_rate_hz * m_cfg.publish_period_s));
   const int32 di_chunk = std::max<int32>(
       1, static_cast<int32>(m_cfg.di_sample_rate_hz * m_cfg.publish_period_s));
-  std::vector<float64> ai_buf(static_cast<std::size_t>(ai_chunk));
+  const bool has_temperature = !m_cfg.temperature_channel.empty();
+  std::vector<float64> ai_buf(static_cast<std::size_t>(ai_chunk) *
+                            (has_temperature ? 2 : 1));
   std::vector<uInt8> di_buf(static_cast<std::size_t>(di_chunk) * 2);
   const double counts_per_rev = m_cfg.encoder_ppr * 4.0;
   constexpr double kSpeedLpfCutoffHz = 2.0; // matches the Python reference.
@@ -275,9 +422,12 @@ void ExternalDaqReader::run() {
       break;
     }
 
-    double last_filtered_v = 0.0;
-    for (const auto voltage : ai_buf)
+    double last_filtered_v = 0.0, sum_raw_v = 0.0;
+    for (int32 i = 0; i < ai_read; ++i) {
+      const double voltage = ai_buf[static_cast<std::size_t>(i)];
+      sum_raw_v += voltage;
       last_filtered_v = torque_lpf.process(voltage);
+    }
 
     int32 di_read = 0;
     int32 bytes_per_sample = 0;
@@ -326,6 +476,8 @@ void ExternalDaqReader::run() {
     filtered_rpm += alpha * (raw_rpm - filtered_rpm);
 
     Sample s;
+    s.steady_time_s = std::chrono::duration<double>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
     analog_samples += ai_read;
     s.sample_index = analog_samples;
     s.t_s = static_cast<double>(analog_samples) / m_cfg.ai_sample_rate_hz;
@@ -333,15 +485,40 @@ void ExternalDaqReader::run() {
         std::chrono::duration<double>(std::chrono::steady_clock::now() - t0)
             .count();
     const double sign = m_cfg.invert_torque_sign ? -1.0 : 1.0;
-    s.torque_nm = sign * ai_buf.back() / m_cfg.torque_sensitivity_v_per_nm;
+    s.torque_nm = sign * ai_buf[static_cast<std::size_t>(ai_read - 1)] /
+                  m_cfg.torque_sensitivity_v_per_nm;
     s.filtered_torque_nm =
         sign * last_filtered_v / m_cfg.torque_sensitivity_v_per_nm;
     s.speed_rpm = filtered_rpm;
+    if (has_temperature) {
+      double sum = 0.0;
+      for (int32 i = 0; i < ai_read; ++i) {
+        const double volts = ai_buf[static_cast<std::size_t>(ai_read + i)];
+        if (!std::isfinite(volts)) {
+          std::lock_guard<std::mutex> lk(m_mutex);
+          m_last_error = "invalid AT20 voltage sample";
+          m_running.store(false);
+          return;
+        }
+        sum += volts;
+      }
+      const double volts = sum / ai_read;
+      const double now = std::chrono::duration<double>(
+          std::chrono::steady_clock::now().time_since_epoch()).count();
+      s.temperature = TemperatureDaqReader::Sample{
+          volts, TemperatureDaqReader::temperatureC(volts), now};
+    }
 
     {
       std::lock_guard<std::mutex> lk(m_mutex);
       s.torque_nm -= m_tare_offset_nm;
       s.filtered_torque_nm -= m_tare_offset_nm;
+      m_torque_blocks.push_back(
+          {s.t_s, sign * sum_raw_v / m_cfg.torque_sensitivity_v_per_nm,
+           static_cast<uint64_t>(ai_read)});
+      while (m_torque_blocks.size() > 1 &&
+             m_torque_blocks.front().end_s <= s.t_s - 60.0)
+        m_torque_blocks.pop_front();
       m_latest = s;
     }
     m_capture.push(s);

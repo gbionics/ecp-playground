@@ -13,6 +13,7 @@
 #include "widgets/locked_rotor_test_panel.hpp"
 #include "widgets/no_load_test_panel.hpp"
 #include "widgets/plot_panel.hpp"
+#include "widgets/thermal_test_panel.hpp"
 #include "widgets/trajectory_panel.hpp"
 
 #include <QApplication>
@@ -96,6 +97,7 @@ MainWindow::MainWindow(RuntimeProfile profile, QString default_config,
   m_locked_rotor_test = new LockedRotorTestDialog(this);
   m_damped_current_settle = new DampedCurrentSettleDialog(this);
   m_no_load_test = new NoLoadTestDialog(this);
+  m_thermal_test = new ThermalTestDialog(this);
   m_no_load_test->setDriveCapture(m_worker->captureBuffer(),
                                 m_worker->capturePeriodS());
 
@@ -109,6 +111,7 @@ MainWindow::MainWindow(RuntimeProfile profile, QString default_config,
   wireSignals();
   if (actuator_test::external_daq_supported()) {
     actuator_test::ExternalDaqConfig external_daq_config;
+    external_daq_config.temperature_channel = "Dev1/ai0";
     m_external_daq =
         std::make_shared<actuator_test::ExternalDaqReader>(external_daq_config);
     std::string error;
@@ -123,6 +126,7 @@ MainWindow::MainWindow(RuntimeProfile profile, QString default_config,
   m_locked_rotor_test->setExternalDaqReader(m_external_daq);
   m_damped_current_settle->setExternalDaqReader(m_external_daq);
   m_no_load_test->setExternalDaqReader(m_external_daq);
+  m_thermal_test->setExternalDaqReader(m_external_daq);
 
   // Enhanced status bar
   m_state_label = new QLabel(tr("disconnected"));
@@ -271,6 +275,13 @@ void MainWindow::buildMenu() {
     m_damped_current_settle->show();
     m_damped_current_settle->raise();
     m_damped_current_settle->activateWindow();
+  });
+  auto *thermal_action =
+      tools_menu->addAction(tr("Copper Loss / Thermal Test..."));
+  connect(thermal_action, &QAction::triggered, this, [this] {
+    m_thermal_test->show();
+    m_thermal_test->raise();
+    m_thermal_test->activateWindow();
   });
   auto *no_load_action = tools_menu->addAction(tr("No-load Speed Test..."));
   connect(no_load_action, &QAction::triggered, this, [this] {
@@ -440,6 +451,18 @@ void MainWindow::wireSignals() {
                                                 frequency_hz, duration_s,
                                                 release});
           });
+  connect(m_thermal_test, &ThermalTestDialog::currentSetpointRequested, this,
+          [this](std::size_t j, double a, bool release) {
+            m_worker->post(CurrentCommand{j, a, release});
+          });
+  connect(m_thermal_test, &ThermalTestDialog::currentRampRequested, this,
+          [this](std::size_t j, double a, double ramp_time_s) {
+            m_worker->post(CurrentRampCommand{j, a, ramp_time_s});
+          });
+  connect(m_thermal_test, &ThermalTestDialog::cyclicCurrentRequested, this,
+          [this](const CyclicCurrentCommand &command) {
+            m_worker->post(command);
+          });
   connect(m_no_load_test, &NoLoadTestDialog::busyChanged, this,
           &MainWindow::updateToolOwnership);
   connect(m_no_load_test, &NoLoadTestDialog::emergencyStopRequested, this,
@@ -603,6 +626,7 @@ void MainWindow::poll() {
   m_locked_rotor_test->appendTelemetry(frame);
   m_damped_current_settle->appendTelemetry(frame);
   m_no_load_test->appendTelemetry(frame);
+  m_thermal_test->appendTelemetry(frame);
   updateToolOwnership();
   m_scheduler->poll(static_cast<uint32_t>(m_timer->interval()));
 
@@ -659,6 +683,7 @@ void MainWindow::refreshJoints(const std::vector<JointInfo> &joints) {
   m_locked_rotor_test->setJoints(joints);
   m_damped_current_settle->setJoints(joints);
   m_no_load_test->setJoints(joints);
+  m_thermal_test->setJoints(joints);
   m_plot->setJoints(m_joint_names);
 
   m_table->setRowCount(static_cast<int>(joints.size()));
@@ -691,7 +716,8 @@ void MainWindow::applyState(ControllerState state) {
 }
 
 bool MainWindow::otherTestBusy() const {
-  return m_locked_rotor_test->isBusy() || m_damped_current_settle->isRunning();
+  return m_locked_rotor_test->isBusy() || m_damped_current_settle->isRunning() ||
+         m_thermal_test->isBusy();
 }
 
 void MainWindow::updateToolOwnership() {
@@ -700,6 +726,7 @@ void MainWindow::updateToolOwnership() {
   m_no_load_test->setAvailable(!otherTestBusy());
   m_locked_rotor_test->setEnabled(!busy);
   m_damped_current_settle->setEnabled(!busy);
+  m_thermal_test->setEnabled(!busy);
   const bool connected = m_last_state != ControllerState::Disconnected;
   m_jog->setEnabledControls(connected &&
                             m_last_state != ControllerState::Running && !owns_motion);

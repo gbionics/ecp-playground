@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <limits>
+#include <stdexcept>
 #include <vector>
 
 #if defined(ACTUATOR_TEST_HAVE_NIDAQMX)
@@ -28,6 +29,8 @@ void require(bool passed, const char *message) {
 struct FakeTask {
   bool analog = false;
   bool started = false;
+  bool differential = false;
+  int analog_channels = 0;
 };
 std::set<FakeTask *> tasks;
 int setup_calls = 0, fail_at = 0, clears = 0, stops = 0, reads = 0;
@@ -36,7 +39,8 @@ bool create_failure_has_handle = true;
 std::atomic<bool> hold_reads{false};
 std::atomic<bool> hold_after_block{false};
 double ai_rate = 50000.0, di_rate = 50000.0;
-enum class ReadMode { analog_error, one_block, digital_error, partial_ai, partial_di };
+enum class ReadMode { analog_error, one_block, digital_error, partial_ai, partial_di,
+                      mean_blocks };
 ReadMode read_mode = ReadMode::analog_error;
 
 int32 setup_status() {
@@ -82,9 +86,13 @@ int32 DAQmxCreateTask(const char *, TaskHandle *handle) {
   *handle = value;
   return status;
 }
-int32 DAQmxCreateAIVoltageChan(TaskHandle handle, const char *, const char *,
-                             int32, float64, float64, int32, const char *) {
+int32 DAQmxCreateAIVoltageChan(TaskHandle handle, const char *channel, const char *,
+                             int32 mode, float64, float64, int32, const char *) {
   task(handle)->analog = true;
+  ++task(handle)->analog_channels;
+  task(handle)->differential |= mode == DAQmx_Val_Diff;
+  if (mode == DAQmx_Val_Diff)
+    require(std::string(channel) == "Dev1/ai0", "incorrect temperature channel");
   return setup_status();
 }
 int32 DAQmxCreateDIChan(TaskHandle handle, const char *, const char *, int32) {
@@ -126,11 +134,26 @@ int32 DAQmxReadAnalogF64(TaskHandle handle, int32 count, float64, int32,
           "invalid analog read");
   while (hold_reads.load())
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  if (read_mode == ReadMode::analog_error || reads++ > 0)
+  const int block = reads++;
+  if (read_mode == ReadMode::analog_error ||
+      block >= (read_mode == ReadMode::mean_blocks ? 3 : 1))
     return -1;
   if (hold_after_block.load())
     hold_reads.store(true);
   std::fill_n(buffer, count, 1.0);
+  if (read_mode == ReadMode::mean_blocks) {
+    const double values[] = {1.0, 3.0, -2.0};
+    std::fill_n(buffer, count, values[block]);
+    // The final sample differs from the block mean.
+    buffer[count - 1] += 1.0;
+  }
+  if (task(handle)->analog_channels == 2) {
+    require(size >= 2 * static_cast<uInt32>(count),
+            "shared analog buffer too small");
+    // Deliberately different from torque: catches wrong channel offsets.
+    for (int32 i = 0; i < count; ++i)
+      buffer[count + i] = 4.0 + 2.0 * i / std::max(1, count - 1);
+  }
   *read = read_mode == ReadMode::partial_ai ? count - 1 : count;
   return warnings ? 1 : 0;
 }
@@ -152,7 +175,14 @@ int main() {
   using actuator_test::ExternalDaqConfig;
   using actuator_test::ExternalDaqReader;
   std::string error;
+  require(actuator_test::TemperatureDaqReader::temperatureC(0.0) == 0.0 &&
+              actuator_test::TemperatureDaqReader::temperatureC(5.0) == 75.0 &&
+              actuator_test::TemperatureDaqReader::temperatureC(10.0) == 150.0,
+          "AT20 scale incorrect");
 #if !defined(ACTUATOR_TEST_HAVE_NIDAQMX)
+  actuator_test::TemperatureDaqReader temperature;
+  require(!temperature.start(error) && !error.empty(), "temperature stub started");
+  require(!temperature.latest(), "temperature stub fabricated a sample");
   ExternalDaqReader reader;
   require(!actuator_test::external_daq_supported(), "stub reports NI support");
   require(!reader.start(error) && !error.empty(), "stub start succeeded");
@@ -161,6 +191,111 @@ int main() {
   require(!reader.running() && reader.lastError().empty(), "stub state changed");
   require(!reader.tare(1.0), "stub accepted tare");
 #else
+  reset();
+  read_mode = ReadMode::mean_blocks;
+  ai_rate = di_rate = 1000.0;
+  {
+    ExternalDaqConfig cfg;
+    cfg.publish_period_s = 0.1;
+    ExternalDaqReader reader(cfg);
+    require(!reader.torqueMean(1.0), "empty reader fabricated a mean");
+    for (double window : {0.0, 61.0, std::numeric_limits<double>::quiet_NaN()}) {
+      bool rejected = false;
+      try {
+        reader.torqueMean(window);
+      } catch (const std::invalid_argument &) {
+        rejected = true;
+      }
+      require(rejected, "invalid torque mean window accepted");
+    }
+    require(reader.start(error), "mean acquisition failed");
+    wait_for_failure(reader);
+    const auto full = reader.torqueMean(1.0);
+    const auto recent = reader.torqueMean(0.1);
+    require(full && full->samples == 300 &&
+                std::abs(full->span_s - 0.3) < 1e-10 &&
+                std::abs(full->torque_nm - (2.0 / 3.0 + 0.01) / 0.025) < 1e-9,
+            "raw sample mean or partial window incorrect");
+    require(recent && recent->samples == 100 &&
+                std::abs(recent->torque_nm - (-2.0 + 0.01) / 0.025) < 1e-9,
+            "trailing mean did not evict old blocks");
+    reader.stop();
+  }
+  for (int failure = 1; failure <= 11; ++failure) {
+    reset();
+    fail_at = failure;
+    ExternalDaqConfig cfg;
+    cfg.temperature_channel = "Dev1/ai0";
+    ExternalDaqReader reader(cfg);
+    require(!reader.start(error) && !error.empty(), "shared setup failure ignored");
+    require(tasks.empty(), "shared setup leaked task");
+  }
+  reset();
+  read_mode = ReadMode::one_block;
+  {
+    ExternalDaqConfig cfg;
+    cfg.temperature_channel = "Dev1/ai0";
+    ExternalDaqReader reader(cfg);
+    reader.captureBuffer().start();
+    require(reader.start(error), "shared torque/temperature start failed");
+    wait_for_failure(reader);
+    reader.stop();
+    const auto sample = reader.latest();
+    require(sample.torque_nm == 40.0 && sample.steady_time_s > 0.0,
+            "shared torque value or timestamp incorrect");
+    const double wc = std::tan(std::acos(-1.0) * cfg.lpf_cutoff_hz / ai_rate);
+    const double k = wc * wc, norm = 1.0 / (1.0 + std::sqrt(2.0) * wc + k);
+    const double b0 = k * norm, b1 = 2.0 * b0, b2 = b0;
+    const double a1 = 2.0 * (k - 1.0) * norm;
+    const double a2 = (1.0 - std::sqrt(2.0) * wc + k) * norm;
+    double z1 = 0.0, z2 = 0.0, expected_filtered = 0.0;
+    for (uint64_t i = 0; i < sample.sample_index; ++i) {
+      expected_filtered = b0 + z1;
+      z1 = b1 - a1 * expected_filtered + z2;
+      z2 = b2 - a2 * expected_filtered;
+    }
+    require(std::abs(sample.filtered_torque_nm -
+                     expected_filtered / cfg.torque_sensitivity_v_per_nm) < 1e-10,
+            "temperature data contaminated torque filter");
+    require(sample.temperature &&
+                std::abs(sample.temperature->voltage_v - 5.0) < 1e-10 &&
+                std::abs(sample.temperature->temperature_c - 75.0) < 1e-9 &&
+                sample.temperature->steady_time_s > 0.0,
+            "shared PT1000 block mean or scale incorrect");
+    require(reader.temperatureChannel() == "Dev1/ai0",
+            "shared temperature channel not exposed");
+    std::vector<ExternalDaqReader::Sample> captured;
+    reader.captureBuffer().drain(captured, true);
+    require(captured.size() == 1 && captured[0].temperature.has_value(),
+            "shared temperature missing from captured block");
+    require(clears == 2 && stops == 2, "shared reader used extra tasks");
+  }
+  for (int failure = 1; failure <= 3; ++failure) {
+    reset();
+    fail_at = failure;
+    actuator_test::TemperatureDaqReader temperature;
+    require(!temperature.start(error) && !error.empty(), "temperature setup accepted");
+    require(tasks.empty(), "temperature setup leaked task");
+  }
+  reset();
+  read_mode = ReadMode::one_block;
+  {
+    actuator_test::TemperatureDaqReader temperature;
+    require(temperature.start(error), "temperature start failed");
+    require(tasks.size() == 1 && (*tasks.begin())->differential,
+            "temperature input is not differential");
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (temperature.running() && std::chrono::steady_clock::now() < deadline)
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    require(!temperature.running() && !temperature.lastError().empty(),
+            "temperature read failure not surfaced");
+    const auto sample = temperature.latest();
+    require(sample && sample->voltage_v == 1.0 && sample->temperature_c == 15.0 &&
+                sample->steady_time_s > 0.0, "temperature sample invalid");
+    temperature.stop();
+    require(tasks.empty() && clears == 1 && stops == 1,
+            "temperature cleanup leaked task");
+  }
   require(actuator_test::external_daq_supported(), "fake NI support missing");
   for (int failure = 1; failure <= 10; ++failure) {
     reset();
@@ -344,6 +479,9 @@ int main() {
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
     require(reader.latest().sample_index > 0 && reader.tare(5.0),
             "initial sample/tare unavailable");
+    const auto mean = reader.torqueMean(1.0);
+    require(mean && std::abs(mean->torque_nm - 35.0) < 1e-9,
+            "tare not applied to raw mean");
     hold_reads.store(false);
     wait_for_failure(reader);
     const auto previous_index = reader.latest().sample_index;

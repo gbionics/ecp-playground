@@ -137,6 +137,151 @@ reading in the application (main plot, locked-rotor and no-load dialogs).
 Offsets accumulate across TARE operations and reset only when the application
 restarts.
 
+## Copper loss / thermal test
+
+**Tools -> Copper Loss / Thermal Test...** applies a manual constant current
+(open loop, same as the main window's **Apply current** box) to one locked
+joint. The first non-zero command starts a recording of motor/drive
+temperature at a fixed rate (default 5 Hz, up to ~60 Hz, limited by the GUI poll);
+later commands change the setpoint without restarting it. **Ramp time** (default
+1 s, 0 = step) applies a minimum-jerk ramp from the present setpoint to the new
+one, both on **Apply current** and on **Return to 0 A**; the averaging window
+starts once the ramp has completed. **Return to 0 A** keeps recording the
+cooling curve, with the joint still in current control at 0 A. **Release** ends
+the recording and saves the CSV files; STOP, fault or window close also end it.
+Applying non-zero current again continues the same recording without discarding
+the cooling samples. The plot always shows the whole test.
+Above the temperature plot, **Commanded current (A)** shows the reference from
+each available GUI telemetry frame on the same time axis, including ramps,
+cyclic operation and cooling. Temperature sampling and CSV sample frequency are
+unchanged; this display is not a control-rate or PWM current trace.
+The **Measured torque - torsiometer (Nm)** plot sits below commanded current
+and shows raw and low-pass-filtered torque from the existing shared NI reader.
+It uses the same time axis, plots each newly observed DAQ block once, and
+continues throughout cooling. It does not open a second DAQ task or depend on
+enabling the PT1000. The label shows live torque before recording too.
+Missing, failed, non-finite or stale (>1 s) DAQ values are not plotted or saved
+as zeros. The temperature CSV appends `torsiometer_raw_nm`,
+`torsiometer_filtered_nm` and `torsiometer_steady_time_s`, using the latest fresh
+reading at the configured temperature sample rate (empty fields if unavailable).
+The timestamp identifies repeated DAQ readings. Calibration, sign and tare are
+those of the shared torsiometer reader; this is measured torque, not `Kt * I`.
+**Raw torque mean window** defaults to 1 s and is adjustable from 0.1 to 60 s,
+including during recording. The numerical label and green **raw mean** curve
+show the signed moving average over all raw analog samples, not GUI-decimated
+values. Acquisition blocks are sample-weighted; the oldest block is included
+whole, so window length is quantized to the DAQ publication period. The label
+reports actual coverage and sample count during startup. The history includes
+acquisition before recording starts, and uses the reader's current sign/tare.
+Changing the window applies to subsequent plotted/exported values.
+CSV additionally includes `torsiometer_raw_mean_nm`, `torsiometer_mean_window_s`,
+`torsiometer_mean_span_s`, and `torsiometer_mean_samples`. Unavailable means
+remain empty. This signed average is not RMS and can cancel alternating torque.
+
+The DC supply is polled automatically for the duration of each recording
+(from **Apply current** until **Release**, including cooling at 0 A;
+untick *Poll automatically* to disable).
+**Start supply polling** starts it manually, e.g. to watch the supply before
+injecting current; samples are stored only while recording. Polling reads the
+ITECH meter continuously (`FETC:VOLT?`,
+`FETC:CURR?`, `FETC:POW?`, ~1 ms each; default 5 Hz, the meter refreshes about
+every 200 ms). It is read-only: no remote mode, output untouched. `MEAS:*?` is
+deliberately not used: each query starts a new ~200 ms measurement. Power is
+plotted under the temperature on the same time axis, with its window mean.
+
+Steady state is evaluated on a trailing window (default 10 min) that never
+reaches back before the last setpoint change: the window must be fully covered
+and the |least-squares slope| of the selected temperature(s) must stay below
+the threshold (default 0.1 °C/min). The same window gives the mean
+temperatures, currents and supply V/I/P (± σ). **Record steady-state point**
+stores those averages in the table. **Export CSV...** writes the temperature
+samples plus `-supply.csv` (polled samples) and `-points.csv` (recorded
+points). At the end of every recording (including STOP, fault, Release or window
+close), the same CSV files are automatically saved in a unique timestamped
+subdirectory under `/home/preddi/Documents/test-actuator-analysis` by default.
+The manual export dialog also starts in that directory.
+The status displays the saved directory. No files from earlier tests are
+overwritten. If saving fails, a warning is shown and the samples remain in memory:
+use **Export CSV...** before starting another recording.
+
+### External PT1000 temperature
+
+The **PT1000 / AT20 - NI DAQ** section reads an independent temperature sensor.
+Click **Read PT1000** to enable it (optional). The default channel is `Dev1/ai0`
+in NI differential mode: AI0 is positive and AI8 is negative on NI devices with
+this differential pairing; verify the specific device pinout before connecting.
+AI8 must not be added as a second independent channel. The AT20 is configured
+for 0-10 V = 0-150 C, so `temperature_C = 15 * voltage_V`.
+In the GUI, the default PT1000 channel is included in the existing torsiometer
+analog task at startup (differential AI0, alongside NRSE AI28). The thermal view
+uses this shared reader instead of opening a competing task on the same DAQ:
+NI devices generally allow only one analog-input task at a time (error -50103).
+Each published block provides the mean PT1000 voltage; torque processing still
+uses only AI28 and the encoder task is unchanged. Disconnecting PT1000 in the
+view disables its display/recording, not the shared acquisition.
+Without a shared reader a standalone background input runs at approximately
+5 Hz. NI resource conflicts with tasks outside this application are reported;
+stop those tasks before acquisition, without resetting the device.
+
+The live label shows voltage and temperature even before recording. During a
+test the PT1000 is plotted alongside motor/drive temperatures, including cooling.
+The existing steady-state criterion still uses motor/drive temperatures.
+The temperature CSV appends `pt1000_voltage_v`, `pt1000_temp_c` and
+`pt1000_steady_time_s` (host monotonic timestamp of the voltage read).
+Missing, disconnected, failed or stale (>1 s) readings produce empty fields,
+not zero temperatures. Each temperature row uses the latest available reading;
+the sensor timestamp identifies repeated readings. Out-of-range voltages are
+flagged in the live label and are not clamped in CSV. Closing the view detaches
+the display and releases any standalone NI task, without stopping a shared
+torsiometer task; Release ends the recording but leaves the live sensor enabled.
+This input requires a build with NI-DAQmx support.
+
+### Cyclic torque for thermal validation
+
+The **Cyclic torque - locked rotor** section generates a synthetic two-level
+gait-like load, not a biomechanical knee trajectory. Keep the rotor mechanically
+blocked. Enter **Output Kt** in Nm per commanded ampere (prefilled from the joint's
+`KT_OUT`), then set signed **Stance torque** and **Swing torque**. The conversion
+is `I = torque / Kt`: verify output-side units and the drive's peak/RMS convention.
+This is estimated torque, not torque feedback. Both torque defaults are zero;
+no non-zero load is selected automatically. The GUI and worker reject invalid
+timing or current levels above the drive's rated current.
+
+Defaults are a 1 s period, 60% stance, and 0.1 s for each minimum-jerk transition.
+Each period consists of a stance plateau until `stance_fraction * period -
+transition`, a transition to swing ending at `stance_fraction * period`, a swing
+plateau until `period - transition`, and a transition back to stance. A negative
+swing torque enables a sign reversal. The preview shows two steady cycles, and
+the label reports the **theoretical cycle RMS current**, including transitions.
+For thermal comparison use RMS or mean-square current, not signed mean current.
+
+**Start cyclic profile** begins recording (or continues an existing recording)
+and sends the complete profile to the real-time control loop, without GUI-timed
+setpoint updates. **Ramp time** must be positive: it ramps from the current
+setpoint to stance before cycling. **Cycling duration** defaults to 600 s,
+excluding entry/exit ramps. At the end, the periodic waveform is smoothly faded
+to zero over **Ramp time**, then held at 0 A. The fade preserves continuity even
+when the duration ends during a transition. Recording and supply polling continue
+through cooling until **Release**. **Return to 0 A** cancels the profile and uses
+the usual ramp to zero; **Apply current** replaces it with a constant command.
+Release, STOP, faults and window close retain their existing immediate stop
+behavior. The worker must confirm profile execution within 2 s, otherwise the
+view releases the joint, warns, and saves the recording.
+
+CSV export additionally writes `-profiles.csv` with each run's requested time,
+first observed start, end/cancellation time, Kt, current levels, timing and
+theoretical cycle RMS. Observed times have telemetry resolution, not exact
+real-time phase accuracy. The sample CSV appends `cyclic_active`,
+`commanded_i2_a2s` and `actual_i2_a2s`: cumulative integrals of squared current,
+relative to the first saved sample, accumulated at the control rate. Between two
+rows, `sqrt(delta(actual_i2_a2s) / delta(time_s))` estimates the interval RMS using
+drive-reported current. These integrals retain the thermal excitation despite
+5 Hz temperature recording; instantaneous CSV current samples alone can alias
+the cycle and should not be used to estimate its RMS. They do not capture PWM
+ripple beyond drive feedback bandwidth. Torque calibration is not verified by
+this tool. A locked-rotor test primarily validates copper heating and stationary
+cooling, not speed-dependent losses or moving-joint cooling.
+
 ## No-load speed test
 
 **Tools > No-load Speed Test...** holds one DUT joint at a single target speed
@@ -147,7 +292,7 @@ torque band, speed tolerance and continuous in-band dwell. Manually control the
 Yaskawa outside this application; this tool sends it no commands. External DAQ
 is mandatory: Start is disabled without fresh valid samples. Close the other
 test dialogs before starting; motion and supply acquisition are exclusive with
-the locked-rotor and damped-current tools.
+the locked-rotor, damped-current and thermal tools.
 
 Speed hold uses `OP_PVT`, zero torque feedforward and the **PVT KP / PVT KD**
 values entered in the dialog. They are prefilled from the selected joint's

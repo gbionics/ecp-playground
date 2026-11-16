@@ -126,6 +126,7 @@ enum class Activity {
   CurrentRamp, ///< Minimum-jerk current transition at the real-time rate.
   DampedCurrent, ///< Damped current sine, then a 0 A settle phase.
   SpeedHold,    ///< Velocity feedback in PVT, with optional continuous rotation.
+  CyclicCurrent, ///< Two-level gait-like thermal excitation.
 };
 
 /// Decimate a raw recorded position trail into spline waypoints, mirroring the
@@ -213,6 +214,11 @@ struct ControllerWorker::Impl {
     double current_ramp_target_a = 0.0;
     double current_ramp_time_s = 0.0;
     double current_ramp_elapsed_s = 0.0;
+    CyclicCurrentProfile cyclic_profile;
+    double cyclic_elapsed_s = 0.0;
+    double cyclic_initial_a = 0.0;
+    double commanded_i2_a2s = 0.0;
+    double actual_i2_a2s = 0.0;
     double damped_amplitude_a = 0.0;
     double damped_decay_time_s = 1.0;
     double damped_frequency_hz = 1.0;
@@ -756,6 +762,43 @@ void ControllerWorker::handleCommand(const CurrentRampCommand &c) {
   recomputeState();
 }
 
+void ControllerWorker::handleCommand(const CyclicCurrentCommand &c) {
+  auto &impl = *m_impl;
+  if (c.joint >= impl.joints.size()) {
+    error("cyclic current command has an invalid joint");
+    return;
+  }
+  auto &jh = impl.joints[c.joint];
+  auto &ct = impl.ctl[c.joint];
+  if (ct.activity == Activity::Trajectory) {
+    error("cyclic current blocked during a trajectory on '" + jh.name + "'");
+    return;
+  }
+  const double rated = jh.driver->rated_current_a();
+  if (!c.profile.valid() || !std::isfinite(rated) || rated <= 0.0 ||
+      std::max(std::fabs(c.profile.stance_a), std::fabs(c.profile.swing_a)) > rated ||
+      !std::isfinite(ct.target_current_a) ||
+      std::fabs(ct.target_current_a) > rated) {
+    error("invalid cyclic current profile or current exceeds rating on '" +
+          jh.name + "'");
+    return;
+  }
+  if (!ct.limits_set) {
+    error("cyclic current blocked on '" + jh.name +
+          "': capture travel limits first");
+    return;
+  }
+  if (!ct.engaged)
+    engageJoint(c.joint);
+  ct.cyclic_profile = c.profile;
+  ct.cyclic_initial_a = ct.target_current_a;
+  ct.cyclic_elapsed_s = 0.0;
+  ct.safety = SafetyState{};
+  ct.activity = Activity::CyclicCurrent;
+  log("cyclic current profile started on '" + jh.name + "'");
+  recomputeState();
+}
+
 void ControllerWorker::handleCommand(const DampedCurrentCommand &c) {
   auto &impl = *m_impl;
   if (c.joint >= impl.joints.size()) {
@@ -1286,6 +1329,7 @@ void ControllerWorker::controlTick() {
 
     case Activity::Current:
     case Activity::CurrentRamp:
+    case Activity::CyclicCurrent:
     case Activity::DampedCurrent: {
       std::string reason;
       if (safety_violated(d, m_profile, jh.name, ct.safety, reason)) {
@@ -1309,6 +1353,15 @@ void ControllerWorker::controlTick() {
               min_jerk(ct.current_ramp_time_s, ct.current_ramp_time_s,
                        ct.current_ramp_start_a, ct.current_ramp_target_a);
           ct.activity = Activity::Current;
+        }
+      } else if (ct.activity == Activity::CyclicCurrent) {
+        ct.target_current_a =
+            ct.cyclic_profile.value(ct.cyclic_elapsed_s, ct.cyclic_initial_a);
+        if (ct.cyclic_elapsed_s >= ct.cyclic_profile.totalDurationS()) {
+          ct.target_current_a = 0.0;
+          ct.activity = Activity::Current;
+        } else {
+          ct.cyclic_elapsed_s += dt;
         }
       } else if (ct.activity == Activity::DampedCurrent) {
         if (ct.damped_elapsed_s < ct.damped_duration_s) {
@@ -1401,6 +1454,15 @@ void ControllerWorker::controlTick() {
     }
     }
 
+    const double actual_current = d.actual_current_a();
+    const bool current_active = ct.activity == Activity::Current ||
+                                ct.activity == Activity::CurrentRamp ||
+                                ct.activity == Activity::CyclicCurrent ||
+                                ct.activity == Activity::DampedCurrent;
+    if (current_active)
+      ct.commanded_i2_a2s += ct.target_current_a * ct.target_current_a * dt;
+    ct.actual_i2_a2s += actual_current * actual_current * dt;
+
     // Free-running recording: capture every joint each tick, whatever the
     // activity, so manual moves / holds / backdriving are all logged.
     if (impl.recording && ct.rec_logger && ct.rec_logger->is_open()) {
@@ -1453,6 +1515,7 @@ void ControllerWorker::recomputeState() {
     case Activity::GoTo:
     case Activity::Current:
     case Activity::CurrentRamp:
+    case Activity::CyclicCurrent:
     case Activity::DampedCurrent:
     case Activity::SpeedHold:
       manual = true;
@@ -1506,6 +1569,9 @@ void ControllerWorker::publishTelemetry() {
           jt.current_a = d.actual_current_a();
           jt.commanded_current_a = ct.target_current_a;
           jt.current_transition_active = (ct.activity == Activity::CurrentRamp);
+          jt.cyclic_current_active = (ct.activity == Activity::CyclicCurrent);
+          jt.commanded_i2_a2s = ct.commanded_i2_a2s;
+          jt.actual_i2_a2s = ct.actual_i2_a2s;
       jt.speed_hold_active = ct.activity == Activity::SpeedHold;
       jt.speed_hold_target_deg_s =
           jt.speed_hold_active ? ct.speed_hold.target_deg_s() : 0.0;
@@ -1543,7 +1609,8 @@ void ControllerWorker::publishTelemetry() {
 
       jt.min_limit_deg = actuator_test::counts2deg(ct.min_counts, bits);
       jt.current_control_active =
-          ct.activity == Activity::Current || ct.activity == Activity::CurrentRamp;
+          ct.activity == Activity::Current || ct.activity == Activity::CurrentRamp ||
+          ct.activity == Activity::CyclicCurrent;
       jt.max_limit_deg = actuator_test::counts2deg(ct.max_counts, bits);
       const bool soft_valid = (ct.soft_max_counts > ct.soft_min_counts);
       const double soft_min_counts =

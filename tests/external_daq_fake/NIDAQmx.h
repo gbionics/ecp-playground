@@ -13,6 +13,7 @@ using uInt8 = uint8_t;
 using float64 = double;
 
 constexpr int DAQmx_Val_NRSE = 1;
+constexpr int DAQmx_Val_Diff = 7;
 constexpr int DAQmx_Val_Volts = 2;
 constexpr int DAQmx_Val_Rising = 3;
 constexpr int DAQmx_Val_ContSamps = 4;
