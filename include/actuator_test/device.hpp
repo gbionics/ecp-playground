@@ -16,6 +16,7 @@ namespace actuator_test {
 enum class DriverKind {
   MyActuator,
   Novanta,
+  SynapticonJDX,
 };
 
 class DriverAdapter {

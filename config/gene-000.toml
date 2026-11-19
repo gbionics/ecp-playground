@@ -507,3 +507,12 @@ max_torque      = 1000
 PVT_KP          = 10000
 PVT_KD          = 1000
 debug           = false
+
+
+
+# Driver Defaults for SynapticonJDX
+[driver_defaults.SynapticonJDX]
+vendor_id      = 0x000022D2
+use_dcsync0    = false
+
+
