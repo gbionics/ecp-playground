@@ -282,6 +282,25 @@ ripple beyond drive feedback bandwidth. Torque calibration is not verified by
 this tool. A locked-rotor test primarily validates copper heating and stationary
 cooling, not speed-dependent losses or moving-joint cooling.
 
+## Drive mode for current tests
+
+Current setpoints (Jog current, locked-rotor, damped-current, cyclic and thermal
+tools) are commanded in amperes through `DriverAdapter::set_target_current_a()`
+in the joint's `current_operation_mode`; position activities (jog, move,
+trajectories, speed hold) use `operation_mode`. The worker switches modes when
+the activity type changes, holding the measured position.
+
+| Driver | `current_operation_mode` default | Current command | Current feedback |
+|--------|----------------------------------|-----------------|------------------|
+| MT_Device | `OP_PVT` | Target Torque `0x6071`, ‰ of rated current | `0x6077` ‰ × rated current |
+| CapitanDrv | same as `operation_mode` | Current quadrature set-point (A) | Current quadrature value |
+| SynapticonJDX | `OP_CST` | Target Torque = Kt × I (Nm) | Actual torque (Nm) / Kt |
+
+Kt comes from `torque_constant_nm_per_a` (per device or in
+`[driver_defaults.<driver>]`), else the MyActuator model table; on
+SynapticonJDX it falls back to motor rated torque / rated current
+(`0x6076` / `0x6075`). JDX Kt is in the drive's motor-side torque units.
+
 ## No-load speed test
 
 **Tools > No-load Speed Test...** holds one DUT joint at a single target speed

@@ -4,6 +4,8 @@
 
 #include <ethercat-primer/core>
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -16,19 +18,25 @@ namespace actuator_test {
 enum class DriverKind {
   MyActuator,
   Novanta,
+  SynapticonJDX,
 };
+
+// TOML `driver` name for a kind (e.g. "MT_Device", "SynapticonJDX").
+const char *driver_kind_name(DriverKind kind) noexcept;
 
 class DriverAdapter {
 public:
   virtual ~DriverAdapter() = default;
 
   virtual DriverKind kind() const noexcept = 0;
-  virtual const char *kind_name() const noexcept = 0;
+  const char *kind_name() const noexcept { return driver_kind_name(kind()); }
   virtual int32_t actual_position() const noexcept = 0;
   virtual int32_t actual_velocity() const noexcept = 0;
   virtual double actual_current_a() const noexcept = 0;
   virtual double rated_current_a() const noexcept = 0;
   virtual double rated_torque_nm() const noexcept { return 0.0; }
+  // Kt used for every current <-> torque conversion; 0 when unknown.
+  virtual double torque_constant_nm_per_a() const noexcept { return 0.0; }
   virtual uint16_t status() const noexcept = 0;
   virtual bool fault() const noexcept = 0;
   virtual uint16_t error_code() const noexcept = 0;
@@ -40,9 +48,18 @@ public:
 
   virtual void set_target_position(int32_t value) noexcept = 0;
   virtual void set_target_velocity(int32_t value) noexcept = 0;
-  // Current command in ‰ of rated current (DS402 "Target Torque", 0x6071);
-  // on this hardware the register drives current directly, not physical torque.
+  // Raw DS402 Target Torque (0x6071) in ‰ of the drive rating (‰ of rated
+  // current on MT_Device). Use set_target_current_a() for current commands.
   virtual void set_target_torque(int16_t value_permille) noexcept = 0;
+  // Current command in A. Default: ‰ of rated current via set_target_torque();
+  // drivers override when they take amps or physical torque instead.
+  virtual void set_target_current_a(double amps) noexcept {
+    const double rated = rated_current_a();
+    const double permille =
+        rated > 0.0 && std::isfinite(amps) ? amps / rated * 1000.0 : 0.0;
+    set_target_torque(static_cast<int16_t>(
+        std::lround(std::clamp(permille, -32000.0, 32000.0))));
+  }
   virtual void update_operation_mode(int8_t op_mode) noexcept = 0;
   virtual void idle() noexcept = 0;
   virtual bool request_fault_reset() noexcept { return false; }
@@ -59,6 +76,10 @@ struct JointHandle {
   std::string model;
   std::string operation_mode_name;
   int8_t operation_mode_code = ecp::DS402::OP_HOM;
+  // Mode used for current/torque setpoint tests (TOML `current_operation_mode`;
+  // defaults per driver, e.g. OP_PVT on MT_Device, OP_CURRENT_CONTROL on JDX).
+  std::string current_mode_name;
+  int8_t current_mode_code = ecp::DS402::OP_HOM;
   int encoder_bits = 17;
   int32_t pvt_kp = 200;
   int32_t pvt_kd = 50;

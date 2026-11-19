@@ -113,7 +113,12 @@ private:
 
   // --- control-thread routines (only run on the worker thread) -----------
   void controlTick();
-  void engageJoint(std::size_t i);
+  enum class ControlIntent { Position, Current };
+  // (Re)enters the drive mode for `intent`, holding the measured position.
+  void engageJoint(std::size_t i, ControlIntent intent);
+  // engageJoint() only when not already engaged in the mode for `intent`.
+  void ensureEngaged(std::size_t i, ControlIntent intent);
+  int8_t driveMode(std::size_t i, ControlIntent intent) const;
   void idleJoint(std::size_t i);
   void recomputeState();
   void publishTelemetry();
