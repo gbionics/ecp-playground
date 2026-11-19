@@ -6,43 +6,53 @@
 #include <cstdio>
 #include <iostream>
 #include <memory>
+#include <span>
 #include <string_view>
 
 namespace actuator_test {
 
 namespace {
 
-constexpr std::string_view kMyActuatorDriverName = "MT_Device";
-constexpr std::string_view kNovantaDriverName = "CapitanDrv";
-constexpr std::string_view kSynapticonJDXDriverName = "SynapticonJDX";
+struct ModeName {
+  std::string_view name;
+  int8_t code;
+};
+
+constexpr ModeName kDs402Modes[] = {
+    {"OP_PP", ecp::DS402::OP_PP},   {"OP_PV", ecp::DS402::OP_PV},
+    {"OP_TQ", ecp::DS402::OP_TQ},   {"OP_PVT", ecp::DS402::OP_PVT},
+    {"OP_HOM", ecp::DS402::OP_HOM}, {"OP_CSP", ecp::DS402::OP_CSP},
+    {"OP_CSV", ecp::DS402::OP_CSV}, {"OP_CST", ecp::DS402::OP_CST},
+};
+
+constexpr ModeName kSynapticonJDXModes[] = {
+    {"OP_PP", ecp::SynapticonJDX::OP_PROFILE_POSITION},
+    {"OP_PROFILE_POSITION", ecp::SynapticonJDX::OP_PROFILE_POSITION},
+    {"OP_PV", ecp::SynapticonJDX::OP_PROFILE_VELOCITY},
+    {"OP_PROFILE_VELOCITY", ecp::SynapticonJDX::OP_PROFILE_VELOCITY},
+    {"OP_TQ", ecp::SynapticonJDX::OP_PROFILE_TORQUE},
+    {"OP_PROFILE_TORQUE", ecp::SynapticonJDX::OP_PROFILE_TORQUE},
+    {"OP_CSP", ecp::SynapticonJDX::OP_CSP},
+    {"OP_CSV", ecp::SynapticonJDX::OP_CSV},
+    {"OP_CST", ecp::SynapticonJDX::OP_CST},
+    {"OP_DIAGNOSTICS", ecp::SynapticonJDX::OP_DIAGNOSTICS},
+    {"OP_JOINT_TORQUE_CONTROL", ecp::SynapticonJDX::OP_JOINT_TORQUE_CONTROL},
+    {"OP_IMP", ecp::SynapticonJDX::OP_IMP},
+    {"OP_CURRENT_CONTROL", ecp::SynapticonJDX::OP_CURRENT_CONTROL},
+};
+
+std::optional<int8_t> mode_from_name(std::span<const ModeName> table,
+                                     std::string_view name) {
+  for (const auto &entry : table) {
+    if (entry.name == name) {
+      return entry.code;
+    }
+  }
+  return std::nullopt;
+}
 
 double finite_or_zero(double value) noexcept {
   return std::isfinite(value) ? value : 0.0;
-}
-
-std::optional<int8_t> synapticon_jdx_mode_from_name(const std::string &name) {
-  using namespace ecp::SynapticonJDX;
-  if (name == "OP_PP" || name == "OP_PROFILE_POSITION")
-    return OP_PROFILE_POSITION;
-  if (name == "OP_PV" || name == "OP_PROFILE_VELOCITY")
-    return OP_PROFILE_VELOCITY;
-  if (name == "OP_TQ" || name == "OP_PROFILE_TORQUE")
-    return OP_PROFILE_TORQUE;
-  if (name == "OP_CSP")
-    return OP_CSP;
-  if (name == "OP_CSV")
-    return OP_CSV;
-  if (name == "OP_CST")
-    return OP_CST;
-  if (name == "OP_DIAGNOSTICS")
-    return OP_DIAGNOSTICS;
-  if (name == "OP_JOINT_TORQUE_CONTROL")
-    return OP_JOINT_TORQUE_CONTROL;
-  if (name == "OP_IMP")
-    return OP_IMP;
-  if (name == "OP_CURRENT_CONTROL")
-    return OP_CURRENT_CONTROL;
-  return std::nullopt;
 }
 
 double torque_constant_for_model(std::string_view model) noexcept {
@@ -59,54 +69,53 @@ double torque_constant_for_model(std::string_view model) noexcept {
   return 0.0;
 }
 
-void populate_common_fields(JointHandle &jh, const ecp::DeviceConfig &cfg,
-                            const std::string &device_name,
-                            const std::string &driver_name) {
-  jh.name = device_name;
-  jh.driver_name = driver_name;
-  jh.alias = static_cast<uint16_t>(cfg.get<int>(device_name, "alias", 0));
-  jh.model = cfg.get<std::string>(device_name, "model", "");
-  jh.torque_constant_nm_per_a = torque_constant_for_model(jh.model);
-  jh.operation_mode_name =
-      cfg.get<std::string>(device_name, "operation_mode", "");
-  if (jh.operation_mode_name.empty()) {
-    jh.operation_mode_name =
-        (driver_name == kMyActuatorDriverName) ? "OP_PVT" : "OP_CSP";
-  }
-
-  const auto op = (driver_name == kSynapticonJDXDriverName)
-                      ? synapticon_jdx_mode_from_name(jh.operation_mode_name)
-                      : ds402_mode_from_name(jh.operation_mode_name);
-  if (!op) {
-    jh.selectable = false;
-    jh.unavailable_reason =
-        "unknown operation_mode='" + jh.operation_mode_name + "'";
-    return;
-  }
-
-  jh.operation_mode_code = *op;
-  jh.pvt_kp = cfg.get<int32_t>(device_name, "PVT_KP", 200);
-  jh.pvt_kd = cfg.get<int32_t>(device_name, "PVT_KD", 50);
-}
-
-class MyActuatorAdapter final : public DriverAdapter {
+// Accessors that every DS402-based ethercat-primer driver exposes identically.
+template <typename Driver, DriverKind Kind>
+class Ds402Adapter : public DriverAdapter {
 public:
-  MyActuatorAdapter(std::shared_ptr<ecp::MyActuator::Driver> driver,
-                    uint16_t encoder_bits, double torque_constant_nm_per_a)
-      : m_driver(std::move(driver)), m_encoder_bits(encoder_bits),
-        m_torque_constant_nm_per_a(torque_constant_nm_per_a) {}
+  Ds402Adapter(std::shared_ptr<Driver> driver, uint16_t encoder_bits)
+      : m_driver(std::move(driver)), m_encoder_bits(encoder_bits) {}
 
-  DriverKind kind() const noexcept override { return DriverKind::MyActuator; }
+  DriverKind kind() const noexcept final { return Kind; }
 
-  const char *kind_name() const noexcept override { return "MT_Device"; }
-
-  int32_t actual_position() const noexcept override {
+  int32_t actual_position() const noexcept final {
     return m_driver->actual_position();
   }
 
-  int32_t actual_velocity() const noexcept override {
+  int32_t actual_velocity() const noexcept final {
     return m_driver->actual_velocity();
   }
+
+  uint16_t status() const noexcept final { return m_driver->status(); }
+
+  bool fault() const noexcept final { return m_driver->fault(); }
+
+  int8_t operation_mode_display() const noexcept final {
+    return m_driver->op_mode_display();
+  }
+
+  void set_target_position(int32_t value) noexcept final {
+    m_driver->set_target_position(value);
+  }
+
+  void set_target_velocity(int32_t value) noexcept final {
+    m_driver->set_target_velocity(value);
+  }
+
+  uint16_t encoder_bits() const noexcept final { return m_encoder_bits; }
+
+protected:
+  std::shared_ptr<Driver> m_driver;
+  uint16_t m_encoder_bits;
+};
+
+class MyActuatorAdapter final
+    : public Ds402Adapter<ecp::MyActuator::Driver, DriverKind::MyActuator> {
+public:
+  MyActuatorAdapter(std::shared_ptr<ecp::MyActuator::Driver> driver,
+                    uint16_t encoder_bits, double torque_constant_nm_per_a)
+      : Ds402Adapter(std::move(driver), encoder_bits),
+        m_torque_constant_nm_per_a(torque_constant_nm_per_a) {}
 
   double actual_current_a() const noexcept override {
     return static_cast<double>(m_driver->actual_torque()) / 1000.0 *
@@ -121,10 +130,6 @@ public:
     return rated_current_a() * m_torque_constant_nm_per_a;
   }
 
-  uint16_t status() const noexcept override { return m_driver->status(); }
-
-  bool fault() const noexcept override { return m_driver->fault(); }
-
   uint16_t error_code() const noexcept override {
     return m_driver->error_code();
   }
@@ -137,18 +142,6 @@ public:
 
   int16_t drive_temperature() const noexcept override {
     return m_driver->drive_temperature();
-  }
-
-  int8_t operation_mode_display() const noexcept override {
-    return m_driver->op_mode_display();
-  }
-
-  void set_target_position(int32_t value) noexcept override {
-    m_driver->set_target_position(value);
-  }
-
-  void set_target_velocity(int32_t value) noexcept override {
-    m_driver->set_target_velocity(value);
   }
 
   void set_target_torque(int16_t value_permille) noexcept override {
@@ -166,31 +159,14 @@ public:
     m_driver->set_pvt_kd(kd);
   }
 
-  uint16_t encoder_bits() const noexcept override { return m_encoder_bits; }
-
 private:
-  std::shared_ptr<ecp::MyActuator::Driver> m_driver;
-  uint16_t m_encoder_bits;
   double m_torque_constant_nm_per_a;
 };
 
-class NovantaAdapter final : public DriverAdapter {
+class NovantaAdapter final
+    : public Ds402Adapter<ecp::Novanta::Driver, DriverKind::Novanta> {
 public:
-  NovantaAdapter(std::shared_ptr<ecp::Novanta::Driver> driver,
-                 uint16_t encoder_bits)
-      : m_driver(std::move(driver)), m_encoder_bits(encoder_bits) {}
-
-  DriverKind kind() const noexcept override { return DriverKind::Novanta; }
-
-  const char *kind_name() const noexcept override { return "CapitanDrv"; }
-
-  int32_t actual_position() const noexcept override {
-    return m_driver->actual_position();
-  }
-
-  int32_t actual_velocity() const noexcept override {
-    return m_driver->actual_velocity();
-  }
+  using Ds402Adapter::Ds402Adapter;
 
   double actual_current_a() const noexcept override {
     return static_cast<double>(m_driver->current_quadrature_value());
@@ -200,10 +176,6 @@ public:
     return static_cast<double>(m_driver->motor_rated_current());
   }
 
-  uint16_t status() const noexcept override { return m_driver->status(); }
-
-  bool fault() const noexcept override { return m_driver->fault(); }
-
   uint16_t error_code() const noexcept override { return 0; }
 
   bool has_temperature_feedback() const noexcept override { return false; }
@@ -211,18 +183,6 @@ public:
   int16_t motor_temperature() const noexcept override { return -1; }
 
   int16_t drive_temperature() const noexcept override { return -1; }
-
-  int8_t operation_mode_display() const noexcept override {
-    return m_driver->op_mode_display();
-  }
-
-  void set_target_position(int32_t value) noexcept override {
-    m_driver->set_target_position(value);
-  }
-
-  void set_target_velocity(int32_t value) noexcept override {
-    m_driver->set_target_velocity(value);
-  }
 
   void set_target_torque(int16_t value_permille) noexcept override {
     // Novanta has no DS402 TargetTorque PDO entry; it commands current
@@ -242,35 +202,13 @@ public:
     m_driver->request_fault_reset();
     return true;
   }
-
-  uint16_t encoder_bits() const noexcept override { return m_encoder_bits; }
-
-private:
-  std::shared_ptr<ecp::Novanta::Driver> m_driver;
-  uint16_t m_encoder_bits;
 };
 
-class SynapticonJDXAdapter final : public DriverAdapter {
+class SynapticonJDXAdapter final
+    : public Ds402Adapter<ecp::SynapticonJDX::Driver,
+                          DriverKind::SynapticonJDX> {
 public:
-  SynapticonJDXAdapter(std::shared_ptr<ecp::SynapticonJDX::Driver> driver,
-                       uint16_t encoder_bits)
-      : m_driver(std::move(driver)), m_encoder_bits(encoder_bits) {}
-
-  DriverKind kind() const noexcept override {
-    return DriverKind::SynapticonJDX;
-  }
-
-  const char *kind_name() const noexcept override {
-    return kSynapticonJDXDriverName.data();
-  }
-
-  int32_t actual_position() const noexcept override {
-    return m_driver->actual_position();
-  }
-
-  int32_t actual_velocity() const noexcept override {
-    return m_driver->actual_velocity();
-  }
+  using Ds402Adapter::Ds402Adapter;
 
   // 0x6077 is ‰ of motor rated torque; scale by rated current like MT_Device.
   double actual_current_a() const noexcept override {
@@ -287,10 +225,6 @@ public:
     return finite_or_zero(m_driver->motor_rated_torque_nm());
   }
 
-  uint16_t status() const noexcept override { return m_driver->status(); }
-
-  bool fault() const noexcept override { return m_driver->fault(); }
-
   uint16_t error_code() const noexcept override {
     return m_driver->error_code();
   }
@@ -304,18 +238,6 @@ public:
     const double celsius = m_driver->drive_temperature_c();
     return std::isfinite(celsius) ? static_cast<int16_t>(std::lround(celsius))
                                   : int16_t{-1};
-  }
-
-  int8_t operation_mode_display() const noexcept override {
-    return m_driver->op_mode_display();
-  }
-
-  void set_target_position(int32_t value) noexcept override {
-    m_driver->set_target_position(value);
-  }
-
-  void set_target_velocity(int32_t value) noexcept override {
-    m_driver->set_target_velocity(value);
   }
 
   void set_target_torque(int16_t value_permille) noexcept override {
@@ -338,127 +260,149 @@ public:
     m_driver->request_fault_reset();
     return true;
   }
-
-  uint16_t encoder_bits() const noexcept override { return m_encoder_bits; }
-
-private:
-  std::shared_ptr<ecp::SynapticonJDX::Driver> m_driver;
-  uint16_t m_encoder_bits;
 };
 
-class MyActuatorFactory final : public DriverFactory {
+// Shared JointHandle construction; drivers only customise the hooks below.
+template <typename Driver> class DriverFactoryBase : public DriverFactory {
 public:
-  std::string_view driver_name() const noexcept override {
-    return kMyActuatorDriverName;
+  std::string_view driver_name() const noexcept final {
+    return driver_kind_name(kind());
   }
 
   std::optional<JointHandle>
   create(const ecp::EthercatBus &bus, const ecp::DeviceConfig &cfg,
-         const std::string &device_name) const override {
-    auto d = bus.get_device<ecp::MyActuator::Driver>(device_name);
+         const std::string &device_name) const final {
+    auto d = bus.get_device<Driver>(device_name);
     if (!d) {
-      std::cerr << "  skip '" << device_name
-                << "': MT_Device not present on bus\n";
+      std::cerr << "  skip '" << device_name << "': " << driver_name()
+                << " not present on bus\n";
       return std::nullopt;
     }
 
     JointHandle jh;
-    populate_common_fields(jh, cfg, device_name, std::string(driver_name()));
+    jh.name = device_name;
+    jh.driver_name = std::string(driver_name());
+    jh.alias = static_cast<uint16_t>(cfg.get<int>(device_name, "alias", 0));
+    jh.model = cfg.get<std::string>(device_name, "model", "");
+    jh.torque_constant_nm_per_a = torque_constant_for_model(jh.model);
+    jh.pvt_kp = cfg.get<int32_t>(device_name, "PVT_KP", 200);
+    jh.pvt_kd = cfg.get<int32_t>(device_name, "PVT_KD", 50);
     jh.encoder_bits =
-        cfg.get<int>(device_name, "encoder_bits", d->encoder_bits());
-    jh.driver = std::make_shared<MyActuatorAdapter>(
-        d, static_cast<uint16_t>(jh.encoder_bits),
-        jh.torque_constant_nm_per_a);
-    jh.rated_current_a = jh.driver->rated_current_a();
-    jh.rated_torque_nm = jh.driver->rated_torque_nm();
-
-    if (jh.operation_mode_name == "OP_PVT") {
-      jh.selectable = true;
-    } else if (jh.unavailable_reason.empty()) {
-      jh.selectable = false;
-      jh.unavailable_reason =
-          "operation_mode='" + jh.operation_mode_name +
-          "' (MT_Device requires OP_PVT for impedance TxPDO watchdog)";
+        cfg.get<int>(device_name, "encoder_bits", default_encoder_bits(*d));
+    jh.operation_mode_name =
+        cfg.get<std::string>(device_name, "operation_mode", "");
+    if (jh.operation_mode_name.empty()) {
+      jh.operation_mode_name = std::string(default_operation_mode());
     }
 
-    return jh;
-  }
-};
-
-class NovantaFactory final : public DriverFactory {
-public:
-  std::string_view driver_name() const noexcept override {
-    return kNovantaDriverName;
-  }
-
-  std::optional<JointHandle>
-  create(const ecp::EthercatBus &bus, const ecp::DeviceConfig &cfg,
-         const std::string &device_name) const override {
-    auto d = bus.get_device<ecp::Novanta::Driver>(device_name);
-    if (!d) {
-      std::cerr << "  skip '" << device_name
-                << "': CapitanDrv not present on bus\n";
-      return std::nullopt;
-    }
-
-    JointHandle jh;
-    populate_common_fields(jh, cfg, device_name, std::string(driver_name()));
-    jh.encoder_bits = cfg.get<int>(device_name, "encoder_bits", 13);
-    jh.driver = std::make_shared<NovantaAdapter>(
-        d, static_cast<uint16_t>(jh.encoder_bits));
-    jh.rated_current_a = jh.driver->rated_current_a();
-    if (jh.unavailable_reason.empty()) {
-      jh.selectable = true;
-    }
-
-    return jh;
-  }
-};
-
-class SynapticonJDXFactory final : public DriverFactory {
-public:
-  std::string_view driver_name() const noexcept override {
-    return kSynapticonJDXDriverName;
-  }
-
-  std::optional<JointHandle>
-  create(const ecp::EthercatBus &bus, const ecp::DeviceConfig &cfg,
-         const std::string &device_name) const override {
-    auto d = bus.get_device<ecp::SynapticonJDX::Driver>(device_name);
-    if (!d) {
-      std::cerr << "  skip '" << device_name
-                << "': SynapticonJDX not present on bus\n";
-      return std::nullopt;
-    }
-
-    JointHandle jh;
-    populate_common_fields(jh, cfg, device_name, std::string(driver_name()));
-    jh.encoder_bits =
-        cfg.get<int>(device_name, "encoder_bits", d->encoder_bits());
-    jh.driver = std::make_shared<SynapticonJDXAdapter>(
-        d, static_cast<uint16_t>(jh.encoder_bits));
+    jh.driver = make_adapter(std::move(d), jh);
     jh.rated_current_a = jh.driver->rated_current_a();
     jh.rated_torque_nm = jh.driver->rated_torque_nm();
     if (jh.torque_constant_nm_per_a <= 0.0 && jh.rated_current_a > 0.0) {
       jh.torque_constant_nm_per_a = jh.rated_torque_nm / jh.rated_current_a;
     }
 
-    if (!jh.unavailable_reason.empty()) {
-      return jh;
-    }
-    if (jh.operation_mode_code == ecp::SynapticonJDX::OP_DIAGNOSTICS) {
-      jh.selectable = false;
-      jh.unavailable_reason =
-          "operation_mode='OP_DIAGNOSTICS' is not a control mode";
-    } else if (jh.encoder_bits <= 0) {
-      jh.selectable = false;
-      jh.unavailable_reason = "encoder resolution unknown (axis units not "
-                              "read; set encoder_bits)";
-    } else {
-      jh.selectable = true;
-    }
-
+    jh.unavailable_reason = availability(jh);
+    jh.selectable = jh.unavailable_reason.empty();
     return jh;
+  }
+
+protected:
+  virtual DriverKind kind() const noexcept = 0;
+  virtual std::span<const ModeName> mode_names() const noexcept {
+    return kDs402Modes;
+  }
+  virtual std::string_view default_operation_mode() const noexcept {
+    return "OP_CSP";
+  }
+  virtual int default_encoder_bits(const Driver &d) const noexcept {
+    return static_cast<int>(d.encoder_bits());
+  }
+  virtual std::shared_ptr<DriverAdapter>
+  make_adapter(std::shared_ptr<Driver> d, const JointHandle &jh) const = 0;
+  // Extra driver-specific constraints on the parsed operation mode.
+  virtual std::string mode_restriction(const JointHandle &) const { return {}; }
+
+private:
+  std::string availability(JointHandle &jh) const {
+    const auto op = mode_from_name(mode_names(), jh.operation_mode_name);
+    if (!op) {
+      return "unknown operation_mode='" + jh.operation_mode_name + "'";
+    }
+    jh.operation_mode_code = *op;
+    if (jh.encoder_bits <= 0) {
+      return "encoder resolution unknown (set encoder_bits)";
+    }
+    return mode_restriction(jh);
+  }
+};
+
+class MyActuatorFactory final
+    : public DriverFactoryBase<ecp::MyActuator::Driver> {
+protected:
+  DriverKind kind() const noexcept override { return DriverKind::MyActuator; }
+
+  std::string_view default_operation_mode() const noexcept override {
+    return "OP_PVT";
+  }
+
+  std::shared_ptr<DriverAdapter>
+  make_adapter(std::shared_ptr<ecp::MyActuator::Driver> d,
+               const JointHandle &jh) const override {
+    return std::make_shared<MyActuatorAdapter>(
+        std::move(d), static_cast<uint16_t>(jh.encoder_bits),
+        jh.torque_constant_nm_per_a);
+  }
+
+  std::string mode_restriction(const JointHandle &jh) const override {
+    if (jh.operation_mode_code == ecp::DS402::OP_PVT) {
+      return {};
+    }
+    return "operation_mode='" + jh.operation_mode_name +
+           "' (MT_Device requires OP_PVT for impedance TxPDO watchdog)";
+  }
+};
+
+class NovantaFactory final : public DriverFactoryBase<ecp::Novanta::Driver> {
+protected:
+  DriverKind kind() const noexcept override { return DriverKind::Novanta; }
+
+  int default_encoder_bits(
+      const ecp::Novanta::Driver &) const noexcept override {
+    return 13;
+  }
+
+  std::shared_ptr<DriverAdapter>
+  make_adapter(std::shared_ptr<ecp::Novanta::Driver> d,
+               const JointHandle &jh) const override {
+    return std::make_shared<NovantaAdapter>(
+        std::move(d), static_cast<uint16_t>(jh.encoder_bits));
+  }
+};
+
+class SynapticonJDXFactory final
+    : public DriverFactoryBase<ecp::SynapticonJDX::Driver> {
+protected:
+  DriverKind kind() const noexcept override {
+    return DriverKind::SynapticonJDX;
+  }
+
+  std::span<const ModeName> mode_names() const noexcept override {
+    return kSynapticonJDXModes;
+  }
+
+  std::shared_ptr<DriverAdapter>
+  make_adapter(std::shared_ptr<ecp::SynapticonJDX::Driver> d,
+               const JointHandle &jh) const override {
+    return std::make_shared<SynapticonJDXAdapter>(
+        std::move(d), static_cast<uint16_t>(jh.encoder_bits));
+  }
+
+  std::string mode_restriction(const JointHandle &jh) const override {
+    if (jh.operation_mode_code != ecp::SynapticonJDX::OP_DIAGNOSTICS) {
+      return {};
+    }
+    return "operation_mode='OP_DIAGNOSTICS' is not a control mode";
   }
 };
 
@@ -475,25 +419,20 @@ const std::vector<std::unique_ptr<DriverFactory>> &driver_factories() {
 
 } // namespace
 
+const char *driver_kind_name(DriverKind kind) noexcept {
+  switch (kind) {
+  case DriverKind::MyActuator:
+    return "MT_Device";
+  case DriverKind::Novanta:
+    return "CapitanDrv";
+  case DriverKind::SynapticonJDX:
+    return "SynapticonJDX";
+  }
+  return "unknown";
+}
+
 std::optional<int8_t> ds402_mode_from_name(const std::string &name) {
-  using namespace ecp::DS402;
-  if (name == "OP_PP")
-    return OP_PP;
-  if (name == "OP_PV")
-    return OP_PV;
-  if (name == "OP_TQ")
-    return OP_TQ;
-  if (name == "OP_PVT")
-    return OP_PVT;
-  if (name == "OP_HOM")
-    return OP_HOM;
-  if (name == "OP_CSP")
-    return OP_CSP;
-  if (name == "OP_CSV")
-    return OP_CSV;
-  if (name == "OP_CST")
-    return OP_CST;
-  return std::nullopt;
+  return mode_from_name(kDs402Modes, name);
 }
 
 const DriverFactory *find_driver_factory(const std::string &driver_name) {

@@ -19,12 +19,15 @@ enum class DriverKind {
   SynapticonJDX,
 };
 
+// TOML `driver` name for a kind (e.g. "MT_Device", "SynapticonJDX").
+const char *driver_kind_name(DriverKind kind) noexcept;
+
 class DriverAdapter {
 public:
   virtual ~DriverAdapter() = default;
 
   virtual DriverKind kind() const noexcept = 0;
-  virtual const char *kind_name() const noexcept = 0;
+  const char *kind_name() const noexcept { return driver_kind_name(kind()); }
   virtual int32_t actual_position() const noexcept = 0;
   virtual int32_t actual_velocity() const noexcept = 0;
   virtual double actual_current_a() const noexcept = 0;
