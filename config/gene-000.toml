@@ -515,8 +515,11 @@ debug           = false
 vendor_id      = 0x000022D2
 use_dcsync0    = false
 # Position activities use operation_mode (default OP_CSP); current tests use
-# current_operation_mode (default OP_CURRENT_CONTROL = -7).
-# operation_mode         = "OP_CSP"
-# current_operation_mode = "OP_CURRENT_CONTROL"
+# current_operation_mode (default OP_CST) with target torque = Kt * I and
+# current feedback = actual torque / Kt. Kt defaults to rated torque / rated
+# current read from the drive (0x6076 / 0x6075, motor side).
+# operation_mode           = "OP_CSP"
+# current_operation_mode   = "OP_CST"
+# torque_constant_nm_per_a = 0.1
 
 

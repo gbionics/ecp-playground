@@ -285,13 +285,21 @@ cooling, not speed-dependent losses or moving-joint cooling.
 ## Drive mode for current tests
 
 Current setpoints (Jog current, locked-rotor, damped-current, cyclic and thermal
-tools) are sent as DS402 Target Torque (`0x6071`, ‰ of rated) in the joint's
-`current_operation_mode`; position activities (jog, move, trajectories, speed
-hold) use `operation_mode`. The worker switches modes when the activity type
-changes, holding the measured position. Defaults: MyActuator uses `OP_PVT` for
-both, Novanta reuses `operation_mode`, and SynapticonJDX uses `OP_CSP` and
-`OP_CURRENT_CONTROL` (-7). Override per device or in `[driver_defaults.<driver>]`,
-e.g. `current_operation_mode = "OP_CST"`.
+tools) are commanded in amperes through `DriverAdapter::set_target_current_a()`
+in the joint's `current_operation_mode`; position activities (jog, move,
+trajectories, speed hold) use `operation_mode`. The worker switches modes when
+the activity type changes, holding the measured position.
+
+| Driver | `current_operation_mode` default | Current command | Current feedback |
+|--------|----------------------------------|-----------------|------------------|
+| MT_Device | `OP_PVT` | Target Torque `0x6071`, ‰ of rated current | `0x6077` ‰ × rated current |
+| CapitanDrv | same as `operation_mode` | Current quadrature set-point (A) | Current quadrature value |
+| SynapticonJDX | `OP_CST` | Target Torque = Kt × I (Nm) | Actual torque (Nm) / Kt |
+
+Kt comes from `torque_constant_nm_per_a` (per device or in
+`[driver_defaults.<driver>]`), else the MyActuator model table; on
+SynapticonJDX it falls back to motor rated torque / rated current
+(`0x6076` / `0x6075`). JDX Kt is in the drive's motor-side torque units.
 
 ## No-load speed test
 

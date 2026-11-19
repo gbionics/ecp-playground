@@ -73,8 +73,10 @@ double torque_constant_for_model(std::string_view model) noexcept {
 template <typename Driver, DriverKind Kind>
 class Ds402Adapter : public DriverAdapter {
 public:
-  Ds402Adapter(std::shared_ptr<Driver> driver, uint16_t encoder_bits)
-      : m_driver(std::move(driver)), m_encoder_bits(encoder_bits) {}
+  Ds402Adapter(std::shared_ptr<Driver> driver, uint16_t encoder_bits,
+               double torque_constant_nm_per_a)
+      : m_driver(std::move(driver)), m_encoder_bits(encoder_bits),
+        m_torque_constant_nm_per_a(torque_constant_nm_per_a) {}
 
   DriverKind kind() const noexcept final { return Kind; }
 
@@ -104,18 +106,24 @@ public:
 
   uint16_t encoder_bits() const noexcept final { return m_encoder_bits; }
 
+  double torque_constant_nm_per_a() const noexcept override {
+    return m_torque_constant_nm_per_a;
+  }
+
+  double rated_torque_nm() const noexcept override {
+    return rated_current_a() * torque_constant_nm_per_a();
+  }
+
 protected:
   std::shared_ptr<Driver> m_driver;
   uint16_t m_encoder_bits;
+  double m_torque_constant_nm_per_a; ///< Configured Kt; 0 when unknown.
 };
 
 class MyActuatorAdapter final
     : public Ds402Adapter<ecp::MyActuator::Driver, DriverKind::MyActuator> {
 public:
-  MyActuatorAdapter(std::shared_ptr<ecp::MyActuator::Driver> driver,
-                    uint16_t encoder_bits, double torque_constant_nm_per_a)
-      : Ds402Adapter(std::move(driver), encoder_bits),
-        m_torque_constant_nm_per_a(torque_constant_nm_per_a) {}
+  using Ds402Adapter::Ds402Adapter;
 
   double actual_current_a() const noexcept override {
     return static_cast<double>(m_driver->actual_torque()) / 1000.0 *
@@ -124,10 +132,6 @@ public:
 
   double rated_current_a() const noexcept override {
     return static_cast<double>(m_driver->rated_current()) / 1000.0;
-  }
-
-  double rated_torque_nm() const noexcept override {
-    return rated_current_a() * m_torque_constant_nm_per_a;
   }
 
   uint16_t error_code() const noexcept override {
@@ -158,9 +162,6 @@ public:
     m_driver->set_pvt_kp(kp);
     m_driver->set_pvt_kd(kd);
   }
-
-private:
-  double m_torque_constant_nm_per_a;
 };
 
 class NovantaAdapter final
@@ -185,11 +186,15 @@ public:
   int16_t drive_temperature() const noexcept override { return -1; }
 
   void set_target_torque(int16_t value_permille) noexcept override {
-    // Novanta has no DS402 TargetTorque PDO entry; it commands current
-    // directly in amperes via CurrentQuadratureSetPoint.
-    const double amps =
-        static_cast<double>(value_permille) / 1000.0 * rated_current_a();
-    m_driver->set_current_quadrature_setpoint(static_cast<float>(amps));
+    set_target_current_a(static_cast<double>(value_permille) / 1000.0 *
+                         rated_current_a());
+  }
+
+  // Novanta has no DS402 TargetTorque PDO entry; it commands current
+  // directly in amperes via CurrentQuadratureSetPoint.
+  void set_target_current_a(double amps) noexcept override {
+    m_driver->set_current_quadrature_setpoint(
+        static_cast<float>(std::isfinite(amps) ? amps : 0.0));
   }
 
   void update_operation_mode(int8_t op_mode) noexcept override {
@@ -210,10 +215,20 @@ class SynapticonJDXAdapter final
 public:
   using Ds402Adapter::Ds402Adapter;
 
-  // 0x6077 is ‰ of motor rated torque; scale by rated current like MT_Device.
+  // Configured Kt, else rated torque / rated current (0x6076 / 0x6075). Kt is
+  // in the drive's torque units (0x6071/0x6077, motor side).
+  double torque_constant_nm_per_a() const noexcept override {
+    if (m_torque_constant_nm_per_a > 0.0) {
+      return m_torque_constant_nm_per_a;
+    }
+    const double rated_a = rated_current_a();
+    return rated_a > 0.0 ? rated_torque_nm() / rated_a : 0.0;
+  }
+
+  // No current feedback in the TxPDO: I = actual torque (0x6077) / Kt.
   double actual_current_a() const noexcept override {
-    return static_cast<double>(m_driver->actual_torque()) / 1000.0 *
-           rated_current_a();
+    const double kt = torque_constant_nm_per_a();
+    return kt > 0.0 ? finite_or_zero(m_driver->actual_torque_nm()) / kt : 0.0;
   }
 
   // Unit-derived values are NaN until the drive's axis-unit SDOs are read.
@@ -244,6 +259,15 @@ public:
     m_driver->set_target_torque(value_permille);
   }
 
+  // Commanded as Target Torque (0x6071) = Kt * I; falls back to zero torque
+  // when Kt is unknown or the request is out of range.
+  void set_target_current_a(double amps) noexcept override {
+    const double kt = torque_constant_nm_per_a();
+    if (!(kt > 0.0) || !m_driver->set_target_torque_nm(amps * kt)) {
+      m_driver->set_target_torque(0);
+    }
+  }
+
   // Queued and applied by the driver's cyclic on_update(), so it is safe from
   // non-RT threads and is dropped while STO/SBC is engaged.
   void update_operation_mode(int8_t op_mode) noexcept override {
@@ -263,7 +287,8 @@ public:
 };
 
 // Shared JointHandle construction; drivers only customise the hooks below.
-template <typename Driver> class DriverFactoryBase : public DriverFactory {
+template <typename Driver, typename Adapter>
+class DriverFactoryBase : public DriverFactory {
 public:
   std::string_view driver_name() const noexcept final {
     return driver_kind_name(kind());
@@ -284,7 +309,6 @@ public:
     jh.driver_name = std::string(driver_name());
     jh.alias = static_cast<uint16_t>(cfg.get<int>(device_name, "alias", 0));
     jh.model = cfg.get<std::string>(device_name, "model", "");
-    jh.torque_constant_nm_per_a = torque_constant_for_model(jh.model);
     jh.pvt_kp = cfg.get<int32_t>(device_name, "PVT_KP", 200);
     jh.pvt_kd = cfg.get<int32_t>(device_name, "PVT_KD", 50);
     jh.encoder_bits =
@@ -300,12 +324,13 @@ public:
                                       ? std::string_view(jh.operation_mode_name)
                                       : default_current_mode());
 
-    jh.driver = make_adapter(std::move(d), jh);
+    jh.driver = std::make_shared<Adapter>(
+        std::move(d), static_cast<uint16_t>(std::max(jh.encoder_bits, 0)),
+        cfg.get<double>(device_name, "torque_constant_nm_per_a",
+                        torque_constant_for_model(jh.model)));
     jh.rated_current_a = jh.driver->rated_current_a();
     jh.rated_torque_nm = jh.driver->rated_torque_nm();
-    if (jh.torque_constant_nm_per_a <= 0.0 && jh.rated_current_a > 0.0) {
-      jh.torque_constant_nm_per_a = jh.rated_torque_nm / jh.rated_current_a;
-    }
+    jh.torque_constant_nm_per_a = jh.driver->torque_constant_nm_per_a();
 
     jh.unavailable_reason = availability(jh);
     jh.selectable = jh.unavailable_reason.empty();
@@ -325,8 +350,6 @@ protected:
   virtual int default_encoder_bits(const Driver &d) const noexcept {
     return static_cast<int>(d.encoder_bits());
   }
-  virtual std::shared_ptr<DriverAdapter>
-  make_adapter(std::shared_ptr<Driver> d, const JointHandle &jh) const = 0;
   // Driver-specific constraint on a parsed mode; returns a reason or empty.
   virtual std::string mode_restriction(std::string_view /*key*/,
                                        const std::string & /*name*/,
@@ -364,20 +387,12 @@ private:
 };
 
 class MyActuatorFactory final
-    : public DriverFactoryBase<ecp::MyActuator::Driver> {
+    : public DriverFactoryBase<ecp::MyActuator::Driver, MyActuatorAdapter> {
 protected:
   DriverKind kind() const noexcept override { return DriverKind::MyActuator; }
 
   std::string_view default_operation_mode() const noexcept override {
     return "OP_PVT";
-  }
-
-  std::shared_ptr<DriverAdapter>
-  make_adapter(std::shared_ptr<ecp::MyActuator::Driver> d,
-               const JointHandle &jh) const override {
-    return std::make_shared<MyActuatorAdapter>(
-        std::move(d), static_cast<uint16_t>(jh.encoder_bits),
-        jh.torque_constant_nm_per_a);
   }
 
   std::string mode_restriction(std::string_view key, const std::string &name,
@@ -390,7 +405,8 @@ protected:
   }
 };
 
-class NovantaFactory final : public DriverFactoryBase<ecp::Novanta::Driver> {
+class NovantaFactory final
+    : public DriverFactoryBase<ecp::Novanta::Driver, NovantaAdapter> {
 protected:
   DriverKind kind() const noexcept override { return DriverKind::Novanta; }
 
@@ -398,17 +414,11 @@ protected:
       const ecp::Novanta::Driver &) const noexcept override {
     return 13;
   }
-
-  std::shared_ptr<DriverAdapter>
-  make_adapter(std::shared_ptr<ecp::Novanta::Driver> d,
-               const JointHandle &jh) const override {
-    return std::make_shared<NovantaAdapter>(
-        std::move(d), static_cast<uint16_t>(jh.encoder_bits));
-  }
 };
 
 class SynapticonJDXFactory final
-    : public DriverFactoryBase<ecp::SynapticonJDX::Driver> {
+    : public DriverFactoryBase<ecp::SynapticonJDX::Driver,
+                               SynapticonJDXAdapter> {
 protected:
   DriverKind kind() const noexcept override {
     return DriverKind::SynapticonJDX;
@@ -418,15 +428,10 @@ protected:
     return kSynapticonJDXModes;
   }
 
-  std::shared_ptr<DriverAdapter>
-  make_adapter(std::shared_ptr<ecp::SynapticonJDX::Driver> d,
-               const JointHandle &jh) const override {
-    return std::make_shared<SynapticonJDXAdapter>(
-        std::move(d), static_cast<uint16_t>(jh.encoder_bits));
-  }
-
+  // Firmware OP_CURRENT_CONTROL (-7) did not respond to 0x6071 on hardware;
+  // CST takes the Kt-converted torque setpoint directly.
   std::string_view default_current_mode() const noexcept override {
-    return "OP_CURRENT_CONTROL";
+    return "OP_CST";
   }
 
   std::string mode_restriction(std::string_view key, const std::string &name,

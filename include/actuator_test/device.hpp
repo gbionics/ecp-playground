@@ -4,6 +4,8 @@
 
 #include <ethercat-primer/core>
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -33,6 +35,8 @@ public:
   virtual double actual_current_a() const noexcept = 0;
   virtual double rated_current_a() const noexcept = 0;
   virtual double rated_torque_nm() const noexcept { return 0.0; }
+  // Kt used for every current <-> torque conversion; 0 when unknown.
+  virtual double torque_constant_nm_per_a() const noexcept { return 0.0; }
   virtual uint16_t status() const noexcept = 0;
   virtual bool fault() const noexcept = 0;
   virtual uint16_t error_code() const noexcept = 0;
@@ -44,9 +48,18 @@ public:
 
   virtual void set_target_position(int32_t value) noexcept = 0;
   virtual void set_target_velocity(int32_t value) noexcept = 0;
-  // Current command in ‰ of rated current (DS402 "Target Torque", 0x6071);
-  // on this hardware the register drives current directly, not physical torque.
+  // Raw DS402 Target Torque (0x6071) in ‰ of the drive rating (‰ of rated
+  // current on MT_Device). Use set_target_current_a() for current commands.
   virtual void set_target_torque(int16_t value_permille) noexcept = 0;
+  // Current command in A. Default: ‰ of rated current via set_target_torque();
+  // drivers override when they take amps or physical torque instead.
+  virtual void set_target_current_a(double amps) noexcept {
+    const double rated = rated_current_a();
+    const double permille =
+        rated > 0.0 && std::isfinite(amps) ? amps / rated * 1000.0 : 0.0;
+    set_target_torque(static_cast<int16_t>(
+        std::lround(std::clamp(permille, -32000.0, 32000.0))));
+  }
   virtual void update_operation_mode(int8_t op_mode) noexcept = 0;
   virtual void idle() noexcept = 0;
   virtual bool request_fault_reset() noexcept { return false; }

@@ -1382,11 +1382,7 @@ void ControllerWorker::controlTick() {
         }
         ct.damped_elapsed_s += dt;
       }
-      const double rated_a = d.rated_current_a();
-      const double permille =
-          rated_a > 0.0 ? (ct.target_current_a / rated_a * 1000.0) : 0.0;
-      d.set_target_torque(static_cast<int16_t>(
-          std::round(std::clamp(permille, -32000.0, 32000.0))));
+      d.set_target_current_a(ct.target_current_a);
       break;
     }
 
