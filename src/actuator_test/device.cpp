@@ -289,11 +289,16 @@ public:
     jh.pvt_kd = cfg.get<int32_t>(device_name, "PVT_KD", 50);
     jh.encoder_bits =
         cfg.get<int>(device_name, "encoder_bits", default_encoder_bits(*d));
+    const auto mode_name = [&](const char *key, std::string_view fallback) {
+      auto name = cfg.get<std::string>(device_name, key, "");
+      return name.empty() ? std::string(fallback) : name;
+    };
     jh.operation_mode_name =
-        cfg.get<std::string>(device_name, "operation_mode", "");
-    if (jh.operation_mode_name.empty()) {
-      jh.operation_mode_name = std::string(default_operation_mode());
-    }
+        mode_name("operation_mode", default_operation_mode());
+    jh.current_mode_name = mode_name(
+        "current_operation_mode", default_current_mode().empty()
+                                      ? std::string_view(jh.operation_mode_name)
+                                      : default_current_mode());
 
     jh.driver = make_adapter(std::move(d), jh);
     jh.rated_current_a = jh.driver->rated_current_a();
@@ -315,25 +320,46 @@ protected:
   virtual std::string_view default_operation_mode() const noexcept {
     return "OP_CSP";
   }
+  // Empty: current tests reuse the operation mode.
+  virtual std::string_view default_current_mode() const noexcept { return {}; }
   virtual int default_encoder_bits(const Driver &d) const noexcept {
     return static_cast<int>(d.encoder_bits());
   }
   virtual std::shared_ptr<DriverAdapter>
   make_adapter(std::shared_ptr<Driver> d, const JointHandle &jh) const = 0;
-  // Extra driver-specific constraints on the parsed operation mode.
-  virtual std::string mode_restriction(const JointHandle &) const { return {}; }
+  // Driver-specific constraint on a parsed mode; returns a reason or empty.
+  virtual std::string mode_restriction(std::string_view /*key*/,
+                                       const std::string & /*name*/,
+                                       int8_t /*code*/) const {
+    return {};
+  }
 
 private:
-  std::string availability(JointHandle &jh) const {
-    const auto op = mode_from_name(mode_names(), jh.operation_mode_name);
+  std::string parse_mode(std::string_view key, const std::string &name,
+                         int8_t &code) const {
+    const auto op = mode_from_name(mode_names(), name);
     if (!op) {
-      return "unknown operation_mode='" + jh.operation_mode_name + "'";
+      return "unknown " + std::string(key) + "='" + name + "'";
     }
-    jh.operation_mode_code = *op;
+    code = *op;
+    return mode_restriction(key, name, code);
+  }
+
+  std::string availability(JointHandle &jh) const {
+    if (auto reason = parse_mode("operation_mode", jh.operation_mode_name,
+                                 jh.operation_mode_code);
+        !reason.empty()) {
+      return reason;
+    }
+    if (auto reason = parse_mode("current_operation_mode", jh.current_mode_name,
+                                 jh.current_mode_code);
+        !reason.empty()) {
+      return reason;
+    }
     if (jh.encoder_bits <= 0) {
       return "encoder resolution unknown (set encoder_bits)";
     }
-    return mode_restriction(jh);
+    return {};
   }
 };
 
@@ -354,11 +380,12 @@ protected:
         jh.torque_constant_nm_per_a);
   }
 
-  std::string mode_restriction(const JointHandle &jh) const override {
-    if (jh.operation_mode_code == ecp::DS402::OP_PVT) {
+  std::string mode_restriction(std::string_view key, const std::string &name,
+                               int8_t code) const override {
+    if (code == ecp::DS402::OP_PVT) {
       return {};
     }
-    return "operation_mode='" + jh.operation_mode_name +
+    return std::string(key) + "='" + name +
            "' (MT_Device requires OP_PVT for impedance TxPDO watchdog)";
   }
 };
@@ -398,11 +425,16 @@ protected:
         std::move(d), static_cast<uint16_t>(jh.encoder_bits));
   }
 
-  std::string mode_restriction(const JointHandle &jh) const override {
-    if (jh.operation_mode_code != ecp::SynapticonJDX::OP_DIAGNOSTICS) {
+  std::string_view default_current_mode() const noexcept override {
+    return "OP_CURRENT_CONTROL";
+  }
+
+  std::string mode_restriction(std::string_view key, const std::string &name,
+                               int8_t code) const override {
+    if (code != ecp::SynapticonJDX::OP_DIAGNOSTICS) {
       return {};
     }
-    return "operation_mode='OP_DIAGNOSTICS' is not a control mode";
+    return std::string(key) + "='" + name + "' is not a control mode";
   }
 };
 

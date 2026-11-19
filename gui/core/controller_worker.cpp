@@ -191,6 +191,7 @@ struct ControllerWorker::Impl {
   struct JointCtl {
     Activity activity = Activity::Idle;
     bool engaged = false;
+    int8_t engaged_mode = 0; ///< Drive mode requested by the last engage.
 
     int32_t min_counts = 0;
     int32_t max_counts = 0;
@@ -384,16 +385,33 @@ ControllerState ControllerWorker::state() const noexcept {
 //  Worker thread
 // ---------------------------------------------------------------------------
 
-void ControllerWorker::engageJoint(std::size_t i) {
+int8_t ControllerWorker::driveMode(std::size_t i, ControlIntent intent) const {
+  const auto &jh = m_impl->joints[i];
+  return intent == ControlIntent::Current ? jh.current_mode_code
+                                          : jh.operation_mode_code;
+}
+
+void ControllerWorker::engageJoint(std::size_t i, ControlIntent intent) {
   auto &jh = m_impl->joints[i];
   auto &c = m_impl->ctl[i];
   auto &d = *jh.driver;
+  const int8_t mode = driveMode(i, intent);
   d.set_target_velocity(0);
   d.set_target_position(d.actual_position());
+  d.set_target_torque(0);
   d.apply_runtime_gains(jh.pvt_kp, jh.pvt_kd);
-  d.update_operation_mode(jh.operation_mode_code);
+  d.update_operation_mode(mode);
   c.cmd_counts = static_cast<double>(d.actual_position());
+  c.target_current_a = 0.0;
   c.engaged = true;
+  c.engaged_mode = mode;
+}
+
+void ControllerWorker::ensureEngaged(std::size_t i, ControlIntent intent) {
+  const auto &c = m_impl->ctl[i];
+  if (!c.engaged || c.engaged_mode != driveMode(i, intent)) {
+    engageJoint(i, intent);
+  }
 }
 
 void ControllerWorker::idleJoint(std::size_t i) {
@@ -596,9 +614,7 @@ void ControllerWorker::handleCommand(const JogCommand &c) {
     return;
   }
 
-  if (!ct.engaged) {
-    engageJoint(c.joint); // leaves backdrive/capture mode
-  }
+  ensureEngaged(c.joint, ControlIntent::Position); // leaves backdrive/capture
   ct.activity = Activity::Jog;
   ct.jog_vel_deg_s = c.velocity_deg_s;
   recomputeState();
@@ -675,7 +691,7 @@ void ControllerWorker::handleCommand(const SpeedHoldCommand &c) {
     error("no-load speed test blocked on '" + jh.name + "': " + reason);
     return;
   }
-  engageJoint(c.joint);
+  engageJoint(c.joint, ControlIntent::Position);
   ct.speed_hold.reset(c.velocity_deg_s, c.ramp_time_s,
                       jh.driver->encoder_bits(), jh.driver->actual_position(),
                       c.pvt_kp > 0);
@@ -722,9 +738,7 @@ void ControllerWorker::handleCommand(const CurrentCommand &c) {
     return;
   }
 
-  if (!ct.engaged) {
-    engageJoint(c.joint);
-  }
+  ensureEngaged(c.joint, ControlIntent::Current);
   ct.activity = Activity::Current;
   ct.target_current_a = c.target_current_a;
   recomputeState();
@@ -750,9 +764,7 @@ void ControllerWorker::handleCommand(const CurrentRampCommand &c) {
         "': backdrive the joint through its range to set limits first");
     return;
   }
-  if (!ct.engaged) {
-    engageJoint(c.joint);
-  }
+  ensureEngaged(c.joint, ControlIntent::Current);
   ct.current_ramp_start_a = ct.target_current_a;
   ct.current_ramp_target_a = c.target_current_a;
   ct.current_ramp_time_s = c.ramp_time_s;
@@ -788,8 +800,7 @@ void ControllerWorker::handleCommand(const CyclicCurrentCommand &c) {
           "': capture travel limits first");
     return;
   }
-  if (!ct.engaged)
-    engageJoint(c.joint);
+  ensureEngaged(c.joint, ControlIntent::Current);
   ct.cyclic_profile = c.profile;
   ct.cyclic_initial_a = ct.target_current_a;
   ct.cyclic_elapsed_s = 0.0;
@@ -832,9 +843,7 @@ void ControllerWorker::handleCommand(const DampedCurrentCommand &c) {
         "': backdrive the joint to set limits first");
     return;
   }
-  if (!ct.engaged) {
-    engageJoint(c.joint);
-  }
+  ensureEngaged(c.joint, ControlIntent::Current);
   ct.activity = Activity::DampedCurrent;
   ct.damped_amplitude_a = c.amplitude_a;
   ct.damped_decay_time_s = c.decay_time_s;
@@ -866,9 +875,7 @@ void ControllerWorker::handleCommand(const GoToCommand &c) {
     return;
   }
 
-  if (!ct.engaged) {
-    engageJoint(c.joint); // leaves backdrive/capture mode
-  }
+  ensureEngaged(c.joint, ControlIntent::Position); // leaves backdrive/capture
 
   const int bits = jh.driver->encoder_bits();
   double target = static_cast<double>(deg2counts(c.target_deg, bits));
@@ -1035,7 +1042,7 @@ void ControllerWorker::handleCommand(const StartTrajectoryCommand &c) {
           make_parametric_trajectory(c.mode, centre, amp, m_profile, bits);
     }
 
-    engageJoint(j);
+    engageJoint(j, ControlIntent::Position);
     ct.start_counts = static_cast<double>(jh.driver->actual_position());
     const double start_deg =
         counts2deg(static_cast<int32_t>(ct.start_counts), bits);

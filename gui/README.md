@@ -282,6 +282,17 @@ ripple beyond drive feedback bandwidth. Torque calibration is not verified by
 this tool. A locked-rotor test primarily validates copper heating and stationary
 cooling, not speed-dependent losses or moving-joint cooling.
 
+## Drive mode for current tests
+
+Current setpoints (Jog current, locked-rotor, damped-current, cyclic and thermal
+tools) are sent as DS402 Target Torque (`0x6071`, ‰ of rated) in the joint's
+`current_operation_mode`; position activities (jog, move, trajectories, speed
+hold) use `operation_mode`. The worker switches modes when the activity type
+changes, holding the measured position. Defaults: MyActuator uses `OP_PVT` for
+both, Novanta reuses `operation_mode`, and SynapticonJDX uses `OP_CSP` and
+`OP_CURRENT_CONTROL` (-7). Override per device or in `[driver_defaults.<driver>]`,
+e.g. `current_operation_mode = "OP_CST"`.
+
 ## No-load speed test
 
 **Tools > No-load Speed Test...** holds one DUT joint at a single target speed

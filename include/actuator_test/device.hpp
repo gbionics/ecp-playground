@@ -63,6 +63,10 @@ struct JointHandle {
   std::string model;
   std::string operation_mode_name;
   int8_t operation_mode_code = ecp::DS402::OP_HOM;
+  // Mode used for current/torque setpoint tests (TOML `current_operation_mode`;
+  // defaults per driver, e.g. OP_PVT on MT_Device, OP_CURRENT_CONTROL on JDX).
+  std::string current_mode_name;
+  int8_t current_mode_code = ecp::DS402::OP_HOM;
   int encoder_bits = 17;
   int32_t pvt_kp = 200;
   int32_t pvt_kd = 50;

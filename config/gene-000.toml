@@ -514,5 +514,9 @@ debug           = false
 [driver_defaults.SynapticonJDX]
 vendor_id      = 0x000022D2
 use_dcsync0    = false
+# Position activities use operation_mode (default OP_CSP); current tests use
+# current_operation_mode (default OP_CURRENT_CONTROL = -7).
+# operation_mode         = "OP_CSP"
+# current_operation_mode = "OP_CURRENT_CONTROL"
 
 
