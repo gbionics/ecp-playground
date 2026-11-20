@@ -16,7 +16,7 @@ include(CTest)
 FetchContent_Declare(
     ethercat_primer
     GIT_REPOSITORY  https://github.com/gbionics/ethercat-primer.git
-    GIT_TAG         integration/hw-tested
+    GIT_TAG         feature/synapticon-motor-temperature
 )
 
 # BUILD_TESTING controls this project's hardware-free regressions, not the
